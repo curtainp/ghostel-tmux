@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- `ghostel-tmux-attach` and `ghostel-tmux-new` show a session that one
+  of them is attached to already in the selected window and return its
+  controller, where they started a second tmux client.
+- "Attached to SESSION" is said only while the echo area still says
+  "Attaching to SESSION...": an attach called with `inhibit-message`
+  says neither.
+- `ghostel-tmux-pane-mode-hook` runs in a pane buffer that knows its
+  session, tmux window and pane.
+
 ### Fixed
 - A pane that arrives while a minibuffer is open, as after
   `ghostel-tmux-attach`, keeps its window when the minibuffer closes.

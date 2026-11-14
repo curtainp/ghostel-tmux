@@ -43,6 +43,15 @@
     {"type": "printf 'AT%sTACH1\\n' ''"},
     {"keys": "RET"},
     {"wait": "until", "pred": "(elate-tmux-line-p \"ATTACH1\")"},
+    {"assert": {"eval": "(with-current-buffer \"*Messages*\" (= 1 (count-matches \"Attached to d1\" (point-min) (point-max))))"}},
+
+    {"group": "attach again", "comment": "a session attached already is shown in the selected window, by the client it has"},
+    {"eval": "(progn (select-window (split-window)) (switch-to-buffer \"*scratch*\") (setq elate-again (ghostel-tmux-attach \"d1\")) t)"},
+    {"wait": "until", "pred": "(and (elate-tmux-shown) (string-search \":d1:\" (buffer-name)))"},
+    {"assert": {"eval": "(equal (elate-tmux-controllers) (list elate-again))"}},
+    {"assert": {"eval": "(equal (elate-tmux-q \"#{session_attached}\" \"d1\") \"1\")"}},
+    {"eval": "(progn (delete-window) t)"},
+    {"wait": "until", "pred": "(elate-tmux-sync-p)"},
 
     {"group": "detach", "comment": "C-t d ends the client; the pane stays as a snapshot, whatever mouse tracking its program had on, and the session lives on"},
     {"eval": "(setq elate-d1 (current-buffer))"},
@@ -58,9 +67,10 @@
     {"wait": "until", "pred": "(equal (elate-tmux-q \"#{session_attached}\" \"d1\") \"0\")"},
 
     {"group": "reattach", "comment": "attaching again, also after the client was killed, makes the snapshot the live pane in its window, also when tmux's active pane is another one; a detach with KEEP keeps it whatever `ghostel-tmux-keep-detached-panes' says"},
-    {"eval": "(progn (ghostel-tmux-attach \"d1\") t)"},
+    {"eval": "(let ((inhibit-message t)) (ghostel-tmux-attach \"d1\") t)", "comment": "an attach that was not to say that it started does not say that it is done"},
     {"wait": "until", "pred": "(and (elate-tmux-shown) (eq (window-buffer) elate-d1))"},
     {"wait": "until", "pred": "(elate-tmux-line-p \"ATTACH1\")"},
+    {"assert": {"eval": "(with-current-buffer \"*Messages*\" (= 1 (count-matches \"Attached to d1\" (point-min) (point-max))))"}},
     {"assert": {"eval": "(equal (elate-tmux-sealed) nil)"}},
     {"assert": {"eval": "(not (buffer-local-value 'buffer-read-only elate-d1))"}},
     {"assert": {"eval": "(not (string-suffix-p \">\" (buffer-name elate-d1)))"}},

@@ -31,6 +31,9 @@ With a remote =default-directory=, =ghostel-tmux-new=, =ghostel-tmux-attach= and
 tmux server started this way keeps the environment of TRAMP's shell, such as
 =PAGER=cat=; start the server on the host first to avoid that.
 
+A session that =ghostel-tmux-new= or =ghostel-tmux-attach= is attached to already
+gets no second client: the selected window shows it.
+
 =ghostel-tmux-socket= selects a tmux server other than the default one.  With a
 prefix argument, =ghostel-tmux-new=, =ghostel-tmux-attach= and
 =ghostel-tmux-capture= prompt for it, and an empty answer is the default server.

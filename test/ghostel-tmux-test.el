@@ -707,6 +707,22 @@ fills its output queue between the two repeats the CR."
         (setq default-directory (expand-file-name "~/"))
         (when (buffer-live-p buf) (kill-buffer buf))))))
 
+(ert-deftest ghostel-tmux-test-pane-mode-hook-knows-the-pane ()
+  (ghostel-tmux-test--with-controller ctl
+    (let* ((seen nil)
+           (ghostel-tmux-pane-mode-hook
+            (list (lambda ()
+                    (push (list ghostel-tmux--controller-buffer
+                                ghostel-tmux--pane-id ghostel-tmux--window-id)
+                          seen))))
+           buf)
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel-make-terminal)
+                     (lambda (name &rest _) (generate-new-buffer name))))
+            (setq buf (ghostel-tmux--get-or-create-pane ctl 5 2))
+            (should (equal seen (list (list ctl 5 2)))))
+        (when (buffer-live-p buf) (kill-buffer buf))))))
+
 (ert-deftest ghostel-tmux-test-failed-pane-leaves-nothing ()
   (ghostel-tmux-test--with-controller ctl
     (cl-letf (((symbol-function 'ghostel-make-terminal)
@@ -2719,6 +2735,89 @@ A later answer clears the pid an earlier one set."
       (kill-buffer second)
       (delete-file script))))
 
+(ert-deftest ghostel-tmux-test-attach-reuses-the-controller ()
+  "A session attached already is not attached again; its window moves."
+  (let* ((script (ghostel-tmux-test--script "sleep 5"))
+         (ghostel-tmux-program script)
+         (first (ghostel-tmux-attach "s"))
+         second other)
+    (unwind-protect
+        (save-window-excursion
+          (setq other (ghostel-tmux-attach "s" "work"))
+          (select-window (split-window))
+          (setq second (ghostel-tmux-attach "s"))
+          (should (eq second first))
+          (should-not (eq other first))
+          (should (eq (buffer-local-value 'ghostel-tmux--auto-host-window first)
+                      (selected-window))))
+      (kill-buffer first)
+      (when (buffer-live-p other) (kill-buffer other))
+      (delete-file script))))
+
+(ert-deftest ghostel-tmux-test-attach-shows-an-attached-session ()
+  "The selected window gets the active pane of a session attached already."
+  (let* ((script (ghostel-tmux-test--script "sleep 5"))
+         (ghostel-tmux-program script)
+         (ctl (ghostel-tmux-attach "s"))
+         (pane (generate-new-buffer " *ghostel-tmux-test-pane*"))
+         (seeds nil)
+         shown)
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf (((symbol-function 'ghostel-tmux--request-window-rows)
+                     (lambda (&optional seed) (push seed seeds))))
+            (should (eq (ghostel-tmux-attach "s") ctl))
+            ;; The rows `%session-changed' asks for are still to come.
+            (should-not seeds)
+            (with-current-buffer ctl
+              (puthash 6 pane ghostel-tmux--panes)
+              (setq ghostel-tmux--session-id 1
+                    ghostel-tmux--current-window-id 0
+                    ghostel-tmux--active-pane-id 6
+                    ghostel-tmux--auto-host-window nil
+                    ghostel-tmux--auto-host-buffer nil))
+            (select-window (split-window))
+            (should (eq (ghostel-tmux-attach "s") ctl))
+            (should (equal seeds '(t))))
+          (should (eq (buffer-local-value 'ghostel-tmux--auto-host-window ctl)
+                      (selected-window)))
+          (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change) #'ignore)
+                    ((symbol-function 'ghostel-tmux--display-pane-in-window)
+                     (lambda (buf window) (setq shown (cons buf window)))))
+            (with-current-buffer ctl
+              (ghostel-tmux--receive-window-rows
+               "@0\t%6\t1\tw\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6" t)))
+          (should (equal shown (cons pane (selected-window))))
+          (should-not (buffer-local-value 'ghostel-tmux--auto-host-window ctl))
+          (should-not (buffer-local-value 'ghostel-tmux--auto-host-buffer ctl)))
+      (kill-buffer ctl)
+      (kill-buffer pane)
+      (delete-file script))))
+
+(ert-deftest ghostel-tmux-test-attach-again-drops-the-held-window ()
+  "A session attached again fills the later window, not one held back."
+  (let* ((script (ghostel-tmux-test--script "sleep 5"))
+         (ghostel-tmux-program script)
+         (ctl (ghostel-tmux-attach "s"))
+         (first (selected-window)))
+    (unwind-protect
+        (save-window-excursion
+          (ghostel-tmux-test--with-minibuffer open
+            (with-current-buffer ctl
+              (ghostel-tmux--fill-kept-window first))
+            (should ghostel-tmux--held-calls)
+            (setq open nil)
+            (select-window (split-window))
+            (should (eq (ghostel-tmux-attach "s") ctl))
+            (should-not ghostel-tmux--held-calls)
+            (should (eq (buffer-local-value 'ghostel-tmux--auto-host-window ctl)
+                        (selected-window)))
+            (should (eq (buffer-local-value 'ghostel-tmux--auto-host-buffer ctl)
+                        (window-buffer)))))
+      (setq ghostel-tmux--held-calls nil)
+      (kill-buffer ctl)
+      (delete-file script))))
+
 (ert-deftest ghostel-tmux-test-failed-rows-release-the-window ()
   "Without the first rows, no later report fills the attach window."
   (ghostel-tmux-test--with-controller ctl
@@ -3891,8 +3990,10 @@ SPEC is (FOLLOWED): that variable collects followed panes."
       (should (eq tiled (ghostel-tmux--attach-pane)))
       (should (eql 5 ghostel-tmux--active-pane-id)))))
 
-(defun ghostel-tmux-test--attach-rows (switch)
-  "Attach, with SWITCH showing another buffer first, and return the pane shown."
+(defun ghostel-tmux-test--attach-rows (switch &optional echo)
+  "Attach, with SWITCH showing another buffer first, and return the pane shown.
+ECHO is what the echo area says when the rows come, by default that the
+attach started; the attach is reported as done only then."
   (let* ((script (ghostel-tmux-test--script "sleep 5"))
          (ghostel-tmux-program script)
          (ghostel-tmux-split-windows nil)
@@ -3911,12 +4012,16 @@ SPEC is (FOLLOWED): that variable collects followed panes."
                      (lambda (buf _window) (setq shown buf)))
                     ((symbol-function 'message)
                      (lambda (fmt &rest args)
-                       (push (apply #'format fmt args) messages))))
+                       (push (apply #'format fmt args) messages)))
+                    ((symbol-function 'current-message)
+                     (lambda () (or echo "Ghostel-tmux: Attaching to s..."))))
             (with-current-buffer ctl
               (ghostel-tmux--receive-window-rows
                "@0\t%6\t1\tw\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6" t)
               (should-not ghostel-tmux--auto-host-window)
-              (should (member "Ghostel-tmux: Attached to s" messages))
+              (should (eq (null echo)
+                          (and (member "Ghostel-tmux: Attached to s" messages)
+                               t)))
               (maphash (lambda (_pid b) (kill-buffer b)) ghostel-tmux--panes)))
           (and shown t))
       (kill-buffer other)
@@ -3929,6 +4034,10 @@ SPEC is (FOLLOWED): that variable collects followed panes."
 (ert-deftest ghostel-tmux-test-attach-leaves-a-window-showing-another-buffer ()
   "A window switched to another buffer during the attach keeps it."
   (should-not (ghostel-tmux-test--attach-rows t)))
+
+(ert-deftest ghostel-tmux-test-attach-leaves-another-message ()
+  "An attach whose message is not in the echo area says nothing later."
+  (should (ghostel-tmux-test--attach-rows nil "Saved")))
 
 (ert-deftest ghostel-tmux-test-attach-shows-the-stand-in ()
   (ghostel-tmux-test--with-controller ctl
