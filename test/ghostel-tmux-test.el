@@ -733,7 +733,8 @@ fills its output queue between the two repeats the CR."
 (ert-deftest ghostel-tmux-test-attach-targets-the-exact-session ()
   (let (args)
     (cl-letf (((symbol-function 'ghostel-tmux--spawn-controller)
-               (lambda (session tmux-args) (setq args (cons session tmux-args)))))
+               (lambda (session tmux-args &rest _)
+                 (setq args (cons session tmux-args)))))
       (ghostel-tmux-attach "proj.0")
       (should (equal '("proj.0" "attach-session" "-t" "=proj.0:") args)))))
 
@@ -741,7 +742,8 @@ fills its output queue between the two repeats the CR."
   (let (args)
     (cl-letf (((symbol-function 'ghostel-tmux--session-exists-p) #'ignore)
               ((symbol-function 'ghostel-tmux--spawn-controller)
-               (lambda (session tmux-args) (setq args (cons session tmux-args)))))
+               (lambda (session tmux-args &rest _)
+                 (setq args (cons session tmux-args)))))
       (ghostel-tmux-new "a#Sb")
       (should (equal '("a#Sb" "new-session" "-As" "a##Sb") args)))))
 
@@ -749,7 +751,8 @@ fills its output queue between the two repeats the CR."
   (let (args)
     (cl-letf (((symbol-function 'ghostel-tmux--session-exists-p) #'always)
               ((symbol-function 'ghostel-tmux--spawn-controller)
-               (lambda (session tmux-args) (setq args (cons session tmux-args)))))
+               (lambda (session tmux-args &rest _)
+                 (setq args (cons session tmux-args)))))
       (ghostel-tmux-new "proj.0")
       (should (equal '("proj.0" "attach-session" "-t" "=proj.0:") args)))))
 
@@ -6734,6 +6737,556 @@ buffer it is given."
           (ghostel-tmux--resize-pane '(10 . 10)))
         (should (equal sizes '((39 . 23))))))
     (should-not sent)))
+
+;; ---------------------------------------------------------------------------
+;; Functions and hooks for other packages
+;; ---------------------------------------------------------------------------
+
+(defmacro ghostel-tmux-test--with-session (ctl panes &rest body)
+  "Run BODY in controller CTL of session $3 `s' with pane buffers PANES.
+PANES is a list of two variables, bound to the buffers of %5 in window
+@0 and of %6 in window @1; %6 is the active pane."
+  (declare (indent 2))
+  `(ghostel-tmux-test--with-controller ,ctl
+     (let ((,(car panes) (generate-new-buffer " *ghostel-tmux-test-5*"))
+           (,(cadr panes) (generate-new-buffer " *ghostel-tmux-test-6*")))
+       (unwind-protect
+           (progn
+             (with-current-buffer ,(car panes)
+               (setq ghostel-tmux--controller-buffer ,ctl
+                     ghostel-tmux--pane-id 5
+                     ghostel-tmux--window-id 0))
+             (with-current-buffer ,(cadr panes)
+               (setq ghostel-tmux--controller-buffer ,ctl
+                     ghostel-tmux--pane-id 6
+                     ghostel-tmux--window-id 1))
+             (puthash 5 ,(car panes) ghostel-tmux--panes)
+             (puthash 6 ,(cadr panes) ghostel-tmux--panes)
+             (puthash 0 (list :name "a" :panes (list 5)) ghostel-tmux--windows)
+             (puthash 1 (list :name "b" :panes (list 6)) ghostel-tmux--windows)
+             (setq ghostel-tmux--session-name "s"
+                   ghostel-tmux--session-id 3
+                   ghostel-tmux--window-order (list 1 0)
+                   ghostel-tmux--current-window-id 1
+                   ghostel-tmux--active-pane-id 6)
+             ,@body)
+         (kill-buffer ,(car panes))
+         (kill-buffer ,(cadr panes))))))
+
+(ert-deftest ghostel-tmux-test-a-pane-names-its-session ()
+  (ghostel-tmux-test--with-session ctl (five six)
+    (with-temp-buffer
+      (should-not (ghostel-tmux-controller))
+      (should-not (ghostel-tmux-session-name))
+      (should-not (ghostel-tmux-pane-id))
+      (should-not (ghostel-tmux-panes)))
+    (dolist (buffer (list ctl five six))
+      (should (eq (ghostel-tmux-controller buffer) ctl))
+      (should (equal (ghostel-tmux-session-name buffer) "s"))
+      (should (equal (ghostel-tmux-session-id buffer) "$3"))
+      (should (equal (ghostel-tmux-panes buffer) (list six five)))
+      (should (eq (ghostel-tmux-active-pane buffer) six)))
+    (should (equal (ghostel-tmux-pane-id five) "%5"))
+    (should (equal (ghostel-tmux-window-id six) "@1"))
+    (should-not (ghostel-tmux-pane-id ctl))
+    (should-not (ghostel-tmux-window-id ctl))
+    (should (eq (ghostel-tmux-pane-buffer 5) five))
+    (should (eq (ghostel-tmux-pane-buffer "%6" five) six))
+    (should-not (ghostel-tmux-pane-buffer 7))
+    ;; Only a pane id names a pane, also when there is a pane %0.
+    (puthash 0 five ghostel-tmux--panes)
+    (should (eq (ghostel-tmux-pane-buffer "%0") five))
+    (dolist (id '("@5" "$5" " %5" "%" "" five nil))
+      (should-not (ghostel-tmux-pane-buffer id)))))
+
+(ert-deftest ghostel-tmux-test-a-detached-pane-has-no-controller ()
+  "A pane kept as a snapshot still says which pane it was."
+  (ghostel-tmux-test--with-session ctl (five six)
+    (with-current-buffer five
+      (setq ghostel-tmux--controller-buffer nil))
+    (should-not (ghostel-tmux-controller five))
+    (should-not (ghostel-tmux-session-name five))
+    (should (equal (ghostel-tmux-pane-id five) "%5"))
+    (should-error (ghostel-tmux-select-pane five) :type 'user-error)
+    (should-error (ghostel-tmux-select-pane ctl) :type 'user-error)))
+
+(ert-deftest ghostel-tmux-test-controllers-are-the-attached-sessions ()
+  (ghostel-tmux-test--with-session ctl (five six)
+    (should-not (memq ctl (ghostel-tmux-controllers)))
+    (cl-letf (((symbol-function 'process-live-p) #'always))
+      (setq ghostel-tmux--controller-process 'fake-proc)
+      (should (equal (ghostel-tmux-controllers) (list ctl))))))
+
+(ert-deftest ghostel-tmux-test-select-pane-selects-in-tmux-and-emacs ()
+  (ghostel-tmux-test--with-session ctl (five six)
+    (let (selected)
+      (cl-letf (((symbol-function 'ghostel-tmux--select-pane-buffer)
+                 (lambda (pane) (setq selected pane))))
+        (ghostel-tmux-select-pane five))
+      (should (eq selected five)))))
+
+(ert-deftest ghostel-tmux-test-window-split-is-the-split-of-the-tmux-window ()
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (let ((outside (split-window (selected-window) nil 'below)))
+      (should-not (ghostel-tmux-window-split))
+      (ghostel-tmux--tile-build 0 (selected-window))
+      (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+        (should (= 2 (length windows)))
+        (should (equal (ghostel-tmux-window-split) windows))
+        ;; A window of the split that shows another buffer is part of it.
+        (set-window-buffer (cadr windows) (get-buffer-create "*scratch*"))
+        (should (equal (ghostel-tmux-window-split (cadr windows)) windows))
+        (should-not (ghostel-tmux-window-split outside))))))
+
+(ert-deftest ghostel-tmux-test-command-gives-the-callback-all-blocks ()
+  "A command of several blocks is one write and one call of the callback."
+  (ghostel-tmux-test--with-session ctl (five six)
+    (let ((sent nil) (calls nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (should-not
+         (ghostel-tmux-command "display-message -p a ; kill-pane -t %9\n\n"
+                               (lambda (output failure)
+                                 (push (list (current-buffer) output failure)
+                                       calls))
+                               five))
+        (should (equal sent
+                       (list (concat "display-message -p a ; kill-pane -t %9\n"
+                                     "display-message -p "
+                                     ghostel-tmux--typed-reply-end "\n"))))
+        (ghostel-tmux-test--feed
+         ctl (concat "%begin 1 1 1\r\ngr\303\266\303\237e\r\n%end 1 1 1\r\n"
+                     "%begin 1 2 1\r\ncan't find pane: %9\r\n%error 1 2 1\r\n"))
+        (should-not calls)
+        (ghostel-tmux-test--feed ctl ghostel-tmux-test--reply-end)
+        (should (equal calls
+                       (list (list ctl "größe" "can't find pane: %9"))))
+        (should-not ghostel-tmux--command-in-flight)))))
+
+(ert-deftest ghostel-tmux-test-command-without-callback-reports-a-failure ()
+  (ghostel-tmux-test--with-session ctl (five six)
+    (let ((sent nil) (messages nil))
+      (ghostel-tmux-test--capturing-messages messages
+        (ghostel-tmux-test--with-wire ctl sent
+          (ghostel-tmux-command "kill-pane -t %9")
+          (ghostel-tmux-test--feed
+           ctl (concat "%begin 1 1 1\r\nno pane\r\n%error 1 1 1\r\n"
+                       ghostel-tmux-test--reply-end))
+          (should (equal messages
+                         '("Ghostel-tmux: Command failed: kill-pane -t %9: no pane")))
+          (setq messages nil)
+          (ghostel-tmux-command "kill-pane -t %9" #'ignore)
+          (ghostel-tmux--pump-deferred ctl)
+          (ghostel-tmux-test--feed
+           ctl (concat "%begin 1 1 1\r\nno pane\r\n%error 1 1 1\r\n"
+                       ghostel-tmux-test--reply-end))
+          (should-not messages))))))
+
+(ert-deftest ghostel-tmux-test-command-needs-a-session-and-a-command ()
+  (with-temp-buffer
+    (should-error (ghostel-tmux-command "list-panes") :type 'user-error))
+  (ghostel-tmux-test--with-session ctl (five six)
+    ;; No tmux client.
+    (should-error (ghostel-tmux-command "list-panes") :type 'user-error)
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (should-error (ghostel-tmux-command " \n") :type 'user-error)
+        (should-not sent)))))
+
+(ert-deftest ghostel-tmux-test-accessors-take-any-buffer ()
+  "A killed buffer and a session tmux has not reported yet give nil."
+  (let ((killed (generate-new-buffer " *ghostel-tmux-test-killed*")))
+    (kill-buffer killed)
+    (dolist (function '(ghostel-tmux-controller ghostel-tmux-session-name
+                        ghostel-tmux-session-id ghostel-tmux-pane-id
+                        ghostel-tmux-window-id ghostel-tmux-panes
+                        ghostel-tmux-active-pane))
+      (should-not (funcall function killed)))
+    (should-not (ghostel-tmux-pane-buffer 5 killed))
+    (should-error (ghostel-tmux-select-pane killed) :type 'user-error))
+  (ghostel-tmux-test--with-session ctl (five six)
+    (setq ghostel-tmux--session-id nil)
+    (should-not (ghostel-tmux-session-name five))
+    (should (eq (ghostel-tmux-controller five) ctl))))
+
+(ert-deftest ghostel-tmux-test-hook-functions-may-change-the-buffer ()
+  "A hook function that selects another buffer leaves the parser its own."
+  (ghostel-tmux-test--with-session ctl (five six)
+    (let* ((other (generate-new-buffer " *ghostel-tmux-test-other*"))
+           (lines nil)
+           (attached 0)
+           (ghostel-tmux-notification-functions
+            (list (lambda (line) (push line lines) (set-buffer other))))
+           (ghostel-tmux-attach-hook
+            (list (lambda () (cl-incf attached) (set-buffer other))))
+           (sent nil)
+           (reply nil))
+      (unwind-protect
+          (ghostel-tmux-test--with-wire ctl sent
+            (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change)
+                       #'ignore))
+              (ghostel-tmux--request-window-rows t)
+              (ghostel-tmux-test--feed
+               ctl (concat "%sessions-changed\r\n%window-add @1\r\n"
+                           "%extended-output %5 0 : hi\r\n"
+                           "%begin 1 1 1\r\n"
+                           "@1\t%6\t1\tb\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6\r\n"
+                           "%end 1 1 1\r\n"
+                           "%sessions-changed\r\n"))
+              (should (eq (current-buffer) ctl))
+              (should (equal (reverse lines)
+                             '("%sessions-changed" "%window-add @1"
+                               "%sessions-changed")))
+              (should (= attached 1))
+              (should (equal ghostel-tmux--line-buffer ""))
+              ;; The reply of the next command is its own.
+              (setq ghostel-tmux--command-queue nil
+                    ghostel-tmux--command-in-flight nil)
+              (ghostel-tmux--queue-command "x" (lambda (out) (setq reply out)))
+              (ghostel-tmux-test--feed ctl "%begin 1 2 1\r\nmine\r\n%end 1 2 1\r\n")
+              (should (equal reply "mine"))))
+        (kill-buffer other)))))
+
+(ert-deftest ghostel-tmux-test-detach-hook-may-change-the-buffer ()
+  "A takeover is torn down in its host whatever the hook selects."
+  (let* ((host (generate-new-buffer " *ghostel-tmux-test-host*"))
+         (pane (generate-new-buffer " *ghostel-tmux-test-pane*"))
+         (other (generate-new-buffer " *ghostel-tmux-test-other*"))
+         (ghostel-tmux-keep-detached-panes nil)
+         (ghostel-tmux-detach-hook (list (lambda () (set-buffer other)))))
+    (unwind-protect
+        (progn
+          (with-current-buffer pane
+            (ghostel-tmux-pane-mode 1)
+            (setq ghostel-tmux--controller-buffer host))
+          (with-current-buffer host
+            (ghostel-mode)
+            (setq ghostel-tmux--panes (make-hash-table)
+                  ghostel-tmux--windows (make-hash-table)
+                  ghostel-tmux--dcs-active t)
+            (puthash 0 pane ghostel-tmux--panes)
+            (ghostel-tmux--dcs-exit))
+          (should-not (buffer-live-p pane))
+          (should-not (buffer-local-value 'ghostel-tmux--panes host)))
+      (when (buffer-live-p pane) (kill-buffer pane))
+      (kill-buffer other)
+      (when (buffer-live-p host) (kill-buffer host)))))
+
+(ert-deftest ghostel-tmux-test-attach-hook-runs-after-a-session-switch ()
+  "The hook runs for the session the client switched to, once it is listed."
+  (ghostel-tmux-test--with-session ctl (five six)
+    (let* ((sessions nil)
+           (ghostel-tmux-attach-hook
+            (list (lambda () (push (ghostel-tmux-session-name) sessions))))
+           (sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change) #'ignore))
+          (ghostel-tmux-test--feed ctl "%session-changed $4 other\r\n")
+          (ghostel-tmux--pump-deferred ctl)
+          (should-not sessions)
+          (ghostel-tmux-test--feed
+           ctl (concat "%begin 1 1 1\r\n"
+                       "@7\t%9\t1\tw\tb25d,80x24,0,0,9\tb25d,80x24,0,0,9\r\n"
+                       "%end 1 1 1\r\n"))
+          (should (equal sessions '("other")))
+          (should (equal (ghostel-tmux-session-id) "$4")))))))
+
+(ert-deftest ghostel-tmux-test-detach-hook-runs-once-on-reset ()
+  "`ghostel-tmux-reset' of a dedicated controller runs the hook once."
+  (let* ((script (ghostel-tmux-test--script "sleep 5"))
+         (ghostel-tmux-program script)
+         (ctl (ghostel-tmux-attach "s" nil t))
+         (runs nil)
+         (ghostel-tmux-detach-hook
+          (list (lambda () (push (current-buffer) runs)))))
+    (unwind-protect
+        (progn
+          (with-current-buffer ctl
+            (ghostel-tmux-reset))
+          (should (equal runs (list ctl)))
+          (should-not (buffer-live-p ctl)))
+      (when (buffer-live-p ctl) (kill-buffer ctl))
+      (delete-file script))))
+
+(ert-deftest ghostel-tmux-test-detach-hook-runs-for-a-killed-host ()
+  "Killing the host of a takeover runs the hook once, before the panes go."
+  (let* ((host (generate-new-buffer " *ghostel-tmux-test-host*"))
+         (pane (generate-new-buffer " *ghostel-tmux-test-pane*"))
+         (seen nil)
+         (ghostel-tmux-detach-hook
+          (list (lambda ()
+                  (push (list (current-buffer) (ghostel-tmux-panes)) seen)))))
+    (unwind-protect
+        (progn
+          (with-current-buffer pane
+            (ghostel-tmux-pane-mode 1)
+            (setq ghostel-tmux--controller-buffer host
+                  ghostel-tmux--pane-id 5
+                  ghostel-tmux--window-id 0))
+          (with-current-buffer host
+            (ghostel-mode)
+            (setq ghostel-tmux--panes (make-hash-table)
+                  ghostel-tmux--windows (make-hash-table)
+                  ghostel-tmux--window-order (list 0)
+                  ghostel-tmux--dcs-active t)
+            (puthash 5 pane ghostel-tmux--panes)
+            (puthash 0 (list :name "w" :panes (list 5)) ghostel-tmux--windows)
+            (add-hook 'kill-buffer-hook #'ghostel-tmux--host-killed nil t))
+          (kill-buffer host)
+          (should (equal seen (list (list host (list pane))))))
+      (when (buffer-live-p pane) (kill-buffer pane))
+      (when (buffer-live-p host) (kill-buffer host)))))
+
+(ert-deftest ghostel-tmux-test-feed-entered-again-handles-each-line-once ()
+  "Output that arrives while a hook function waits is handled once, in order."
+  (ghostel-tmux-test--with-session ctl (five six)
+    (let* ((lines nil)
+           (waited nil)
+           (ghostel-tmux-notification-functions
+            (list (lambda (line)
+                    (push line lines)
+                    (unless waited
+                      (setq waited t)
+                      ;; As the process filter does while a function waits.
+                      (ghostel-tmux--feed-bytes "%window-add @8\r\n%sess"))))))
+      (setq ghostel-tmux--parser-state 'idle)
+      (cl-letf (((symbol-function 'ghostel-tmux--on-window-add) #'ignore))
+        (ghostel-tmux-test--feed ctl "%sessions-changed\r\n%window-add @7\r\n")
+        (should (equal ghostel-tmux--line-buffer "%sess"))
+        (ghostel-tmux-test--feed ctl "ions-changed\r\n"))
+      (should (equal (reverse lines)
+                     '("%sessions-changed" "%window-add @7" "%window-add @8"
+                       "%sessions-changed")))
+      (should (equal ghostel-tmux--line-buffer "")))))
+
+(ert-deftest ghostel-tmux-test-detach-hook-may-kill-the-host ()
+  "A hook function that kills the host of a takeover runs once."
+  (dolist (end (list #'ghostel-tmux--dcs-exit #'kill-buffer))
+    (let* ((host (generate-new-buffer " *ghostel-tmux-test-host*"))
+           (pane (generate-new-buffer " *ghostel-tmux-test-pane*"))
+           (other (generate-new-buffer " *ghostel-tmux-test-other*"))
+           (runs 0)
+           (sent nil)
+           (ghostel-tmux-keep-detached-panes nil)
+           (ghostel-tmux-detach-hook
+            (list (lambda ()
+                    (cl-incf runs)
+                    (when (buffer-live-p host) (kill-buffer host))))))
+      (unwind-protect
+          (progn
+            (with-current-buffer pane
+              (ghostel-tmux-pane-mode 1)
+              (setq ghostel-tmux--controller-buffer host
+                    ghostel-tmux--pane-id 5))
+            (with-current-buffer host
+              (ghostel-mode)
+              (setq ghostel-tmux--panes (make-hash-table)
+                    ghostel-tmux--windows (make-hash-table)
+                    ghostel-tmux--dcs-active t)
+              (puthash 5 pane ghostel-tmux--panes)
+              (add-hook 'kill-buffer-hook #'ghostel-tmux--host-killed nil t))
+            (cl-letf (((symbol-function 'ghostel-send-string)
+                       (lambda (&rest _) (push (current-buffer) sent))))
+              (with-current-buffer other
+                (with-current-buffer host
+                  (funcall end))))
+            (should (= runs 1))
+            (should-not sent)
+            (should-not (buffer-live-p host))
+            (should-not (buffer-live-p pane)))
+        (when (buffer-live-p pane) (kill-buffer pane))
+        (kill-buffer other)
+        (when (buffer-live-p host) (kill-buffer host))))))
+
+(ert-deftest ghostel-tmux-test-select-pane-waits-for-the-minibuffer ()
+  (ghostel-tmux-test--with-session ctl (five six)
+    (let (selected)
+      (ghostel-tmux-test--with-minibuffer open
+        (cl-letf (((symbol-function 'ghostel-tmux--select-pane-buffer)
+                   (lambda (pane) (setq selected pane))))
+          (ghostel-tmux-select-pane five)
+          (should-not selected)
+          (setq open nil)
+          (ghostel-tmux--run-held-calls)
+          (should (eq selected five)))))))
+
+(ert-deftest ghostel-tmux-test-detach-takes-a-buffer ()
+  "A session is detached from any buffer by one of its panes."
+  (ghostel-tmux-test--with-session ctl (five six)
+    (let ((deleted nil) (sent nil))
+      (setq ghostel-tmux--controller-process 'fake-proc
+            ghostel-tmux--parser-state 'idle)
+      (cl-letf (((symbol-function 'process-live-p) #'always)
+                ((symbol-function 'process-send-string)
+                 (lambda (_p s) (push s sent)))
+                ((symbol-function 'accept-process-output) #'ignore)
+                ((symbol-function 'ghostel-tmux--seal-panes) #'ignore)
+                ((symbol-function 'delete-process)
+                 (lambda (p) (setq deleted p))))
+        (with-temp-buffer
+          (should-error (ghostel-tmux-detach) :type 'user-error)
+          (ghostel-tmux-detach nil five)))
+      (should (equal sent '("detach-client\n")))
+      (should (eq deleted 'fake-proc)))))
+
+(ert-deftest ghostel-tmux-test-command-is-refused-once-tmux-leaves ()
+  (ghostel-tmux-test--with-session ctl (five six)
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (setq ghostel-tmux--closing t)
+        (should-error (ghostel-tmux-command "list-panes" #'ignore)
+                      :type 'user-error)
+        (should-not sent)))))
+
+(ert-deftest ghostel-tmux-test-notifications-reach-the-hook ()
+  "The hook gets each notification as text, after it was acted on."
+  (ghostel-tmux-test--with-session ctl (five six)
+    (let* ((seen nil)
+           (ghostel-tmux-notification-functions
+            (list (lambda (line)
+                    (push (list line (current-buffer)
+                                (plist-get (gethash 1 ghostel-tmux--windows)
+                                           :name))
+                          seen)))))
+      (setq ghostel-tmux--parser-state 'idle)
+      (cl-letf (((symbol-function 'ghostel-tmux--on-output) #'ignore))
+        (ghostel-tmux-test--feed
+         ctl (concat "%output %5 hi\r\n"
+                     "%window-renamed @1 gr\303\266\303\237e\r\n"
+                     "%subscription-changed x $3 @1 1 %6 : v\r\n"
+                     "%begin 1 1 0\r\n%not-one\r\n%end 1 1 0\r\n")))
+      (should (equal (reverse seen)
+                     (list (list "%window-renamed @1 größe" ctl "größe")
+                           (list "%subscription-changed x $3 @1 1 %6 : v"
+                                 ctl "größe")))))))
+
+(ert-deftest ghostel-tmux-test-a-failing-hook-function-is-reported ()
+  (ghostel-tmux-test--with-session ctl (five six)
+    (let* ((messages nil)
+           (later 0)
+           (ghostel-tmux-notification-functions
+            (list (lambda (_line) (error "Broken"))
+                  (lambda (_line) (cl-incf later)))))
+      (setq ghostel-tmux--parser-state 'idle)
+      (ghostel-tmux-test--capturing-messages messages
+        (ghostel-tmux-test--feed ctl "%sessions-changed\r\n%window-add @1\r\n"))
+      (should (= 2 (length messages)))
+      ;; The functions after the failing one still run.
+      (should (= later 2))
+      (should (string-search "ghostel-tmux-notification-functions: Broken"
+                             (car messages))))))
+
+(ert-deftest ghostel-tmux-test-attach-hook-runs-with-the-first-rows ()
+  "The hook runs in the controller for the rows of an attach, not later ones."
+  (ghostel-tmux-test--with-session ctl (five six)
+    (let* ((runs nil)
+           (ghostel-tmux-attach-hook
+            (list (lambda ()
+                    (push (list (current-buffer) (ghostel-tmux-active-pane))
+                          runs))))
+           (rows "@1\t%6\t1\tb\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6"))
+      (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change) #'ignore))
+        (ghostel-tmux--receive-window-rows rows)
+        (should-not runs)
+        (ghostel-tmux--receive-window-rows rows t)
+        (should (equal runs (list (list ctl six))))))))
+
+(ert-deftest ghostel-tmux-test-attach-hook-waits-for-the-minibuffer ()
+  "The hook runs after the pane took its window, with no minibuffer open."
+  (ghostel-tmux-test--with-session ctl (five six)
+    (let* ((order nil)
+           (ghostel-tmux-attach-hook (list (lambda () (push 'hook order))))
+           (rows "@1\t%6\t1\tb\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6"))
+      (ghostel-tmux-test--with-minibuffer open
+        (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change) #'ignore)
+                  ((symbol-function 'ghostel-tmux--display-pane-in-window)
+                   (lambda (&rest _) (push 'pane order))))
+          (setq ghostel-tmux--auto-host-window (selected-window))
+          (ghostel-tmux--receive-window-rows rows t)
+          (should-not order)
+          (setq open nil)
+          (ghostel-tmux--run-held-calls)
+          (should (equal order '(hook pane))))))))
+
+(ert-deftest ghostel-tmux-test-attach-without-display-claims-no-window ()
+  "An attach with NO-DISPLAY leaves the windows alone and runs the hook."
+  (let* ((script (ghostel-tmux-test--script "sleep 5"))
+         (ghostel-tmux-program script)
+         (ctl (ghostel-tmux-attach "s" nil t))
+         (runs 0)
+         (ghostel-tmux-attach-hook (list (lambda () (cl-incf runs))))
+         (seeds nil)
+         shown)
+    (unwind-protect
+        (cl-letf (((symbol-function 'ghostel-make-terminal)
+                   (lambda (name &rest _) (generate-new-buffer name)))
+                  ((symbol-function 'ghostel-tmux--set-pane-size) #'ignore)
+                  ((symbol-function 'ghostel-tmux--bootstrap-pane) #'ignore)
+                  ((symbol-function 'ghostel-tmux--display-pane-in-window)
+                   (lambda (buf _window) (setq shown buf)))
+                  ((symbol-function 'ghostel-tmux--request-window-rows)
+                   (lambda (&optional seed) (push seed seeds))))
+          (with-current-buffer ctl
+            (should-not ghostel-tmux--auto-host-window)
+            (should-not ghostel-tmux--auto-host-buffer)
+            (ghostel-tmux--receive-window-rows
+             "@0\t%6\t1\tw\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6" t)
+            (should-not shown)
+            (should (= runs 1))
+            ;; Attached already: the rows are asked for, for the hook.
+            (setq ghostel-tmux--session-id 1)
+            (should (eq (ghostel-tmux-new "s" nil t) ctl))
+            (should (equal seeds '(t)))
+            (should-not ghostel-tmux--auto-host-window)
+            (maphash (lambda (_pid b) (kill-buffer b)) ghostel-tmux--panes)))
+      (kill-buffer ctl)
+      (delete-file script))))
+
+(ert-deftest ghostel-tmux-test-detach-hook-runs-before-the-panes-go ()
+  "The hook of a dedicated controller sees the session's panes."
+  (ghostel-tmux-test--with-controller ctl
+    (let* ((pane (generate-new-buffer " *ghostel-tmux-test-pane*"))
+           (seen nil)
+           (ghostel-tmux-detach-hook
+            (list (lambda ()
+                    (push (list (current-buffer)
+                                (buffer-local-value 'buffer-read-only pane))
+                          seen)))))
+      (unwind-protect
+          (progn
+            (with-current-buffer pane
+              (ghostel-tmux-pane-mode 1))
+            (puthash 0 pane ghostel-tmux--panes)
+            (cl-letf (((symbol-function 'process-buffer) (lambda (_p) ctl))
+                      ((symbol-function 'process-live-p) #'ignore))
+              (ghostel-tmux--sentinel 'fake-proc "killed: 9\n"))
+            (should (equal seen (list (list ctl nil)))))
+        (when (buffer-live-p pane) (kill-buffer pane))))))
+
+(ert-deftest ghostel-tmux-test-detach-hook-runs-for-a-takeover ()
+  "The hook runs once in the host, which still is the panes' controller."
+  (let* ((host (generate-new-buffer " *ghostel-tmux-test-host*"))
+         (pane (generate-new-buffer " *ghostel-tmux-test-pane*"))
+         (seen nil)
+         (ghostel-tmux-detach-hook
+          (list (lambda ()
+                  (push (list (current-buffer) (ghostel-tmux-controller pane))
+                        seen)))))
+    (unwind-protect
+        (progn
+          (with-current-buffer pane
+            (ghostel-tmux-pane-mode 1)
+            (setq ghostel-tmux--controller-buffer host))
+          (with-current-buffer host
+            (ghostel-mode)
+            (setq ghostel-tmux--panes (make-hash-table)
+                  ghostel-tmux--windows (make-hash-table)
+                  ghostel-tmux--dcs-active t)
+            (puthash 0 pane ghostel-tmux--panes)
+            (ghostel-tmux--dcs-exit)
+            (ghostel-tmux--dcs-exit))
+          (should (equal seen (list (list host host)))))
+      (when (buffer-live-p pane) (kill-buffer pane))
+      (when (buffer-live-p host) (kill-buffer host)))))
 
 (provide 'ghostel-tmux-test)
 

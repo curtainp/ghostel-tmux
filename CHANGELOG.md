@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Functions for packages that build on ghostel-tmux, see "For other
+  packages" in the README: `ghostel-tmux-controller`,
+  `ghostel-tmux-controllers`, `ghostel-tmux-session-name`,
+  `ghostel-tmux-session-id`, `ghostel-tmux-panes`,
+  `ghostel-tmux-pane-buffer`, `ghostel-tmux-active-pane`,
+  `ghostel-tmux-pane-id`, `ghostel-tmux-window-id`,
+  `ghostel-tmux-window-split`, `ghostel-tmux-select-pane`, and
+  `ghostel-tmux-command`, which sends tmux a command and gives a callback
+  its reply.
+- `ghostel-tmux-attach-hook` runs when the panes of a session are there,
+  `ghostel-tmux-detach-hook` when its tmux client ends, and
+  `ghostel-tmux-notification-functions` for each notification of tmux.
+- `ghostel-tmux-attach` and `ghostel-tmux-new` take NO-DISPLAY: no window
+  is to show the session.  `ghostel-tmux-detach` takes the BUFFER whose
+  session to detach.
+
 ### Changed
 - `ghostel-tmux-attach` and `ghostel-tmux-new` show a session that one
   of them is attached to already in the selected window and return its

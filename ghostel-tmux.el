@@ -135,6 +135,32 @@ or nil) and PANE-ID (integer).  Must return a string."
   :group 'ghostel-tmux)
 
 
+;; Hooks
+
+(defvar ghostel-tmux-attach-hook nil
+  "Normal hook run when tmux has listed the windows of a session.
+That is after `ghostel-tmux-attach', `ghostel-tmux-new' or a takeover,
+after an attach to a session that is attached already, and after the
+client switched to another session, which runs no
+`ghostel-tmux-detach-hook' for the session left.  It runs in the
+session's controller buffer, when the active pane has taken its window
+and no minibuffer is open, so its functions may change windows.")
+
+(defvar ghostel-tmux-detach-hook nil
+  "Normal hook run when the tmux client of a session ends.
+The client was detached, tmux exited or was killed, an attach failed,
+or the shell buffer of a takeover was killed.  It runs in the session's
+controller buffer, before the session's pane buffers are killed or kept
+as snapshots.")
+
+(defvar ghostel-tmux-notification-functions nil
+  "Abnormal hook run for each notification of tmux, except pane output.
+Each function is called with the line as text, such as
+\"%window-renamed @1 name\", in the session's controller buffer, once
+ghostel-tmux has acted on it.  tmux reports some changes for every
+session on its server.")
+
+
 ;; Internal state — controller buffer
 
 ;; The "controller" holds all parser state and dispatches notifications to
@@ -420,7 +446,7 @@ Each record is (PANE-ID WIDTH HEIGHT X Y)."
   "Pattern matching a `%end TIME CMD FLAGS' or `%error ...' terminator.")
 
 (defvar ghostel-tmux--in-feed nil
-  "Non-nil while `ghostel-tmux--feed-bytes' is dispatching protocol lines.
+  "The controllers whose `ghostel-tmux--feed-bytes' is dispatching lines.
 Controller sends triggered from inside the feed (command
 continuations, layout-driven resizes) are deferred to a timer by
 `ghostel-tmux--pump-command-queue': a blocking process write can
@@ -428,50 +454,54 @@ re-enter process filters and deliver protocol bytes out of order.")
 
 (defun ghostel-tmux--feed-bytes (string)
   "Feed STRING (process output) to the parser in the current buffer.
-Splits on newlines, dispatches per-line via the state machine."
+Splits on newlines, dispatches per-line via the state machine.
+Output that arrives while a line is handled, as when its handler waits,
+is left to the feed under way."
   (setq ghostel-tmux--line-buffer
         (concat ghostel-tmux--line-buffer string))
-  ;; Strip the DCS preamble `\eP1000p' if we haven't seen it yet.
-  (when (eq ghostel-tmux--parser-state 'preamble)
-    (let ((p (string-match-p "\eP1000p" ghostel-tmux--line-buffer)))
-      (when p
-        (setq ghostel-tmux--line-buffer
-              (substring ghostel-tmux--line-buffer (+ p 7)))
-        (setq ghostel-tmux--parser-state 'idle))))
-  (when (eq ghostel-tmux--parser-state 'preamble)
-    ;; `tmux -C' sends no DCS: a `%' at line-start switches to idle.
-    ;; Anything before that `%' is dispatched as idle lines, where
-    ;; non-protocol lines are dropped.
-    (when (string-match-p "^%" ghostel-tmux--line-buffer)
-      (setq ghostel-tmux--parser-state 'idle)))
-  (when (memq ghostel-tmux--parser-state '(idle block))
-    (let ((buffer (current-buffer))
-          (idx 0)
-          (ghostel-tmux--in-feed t))
-      ;; `ghostel-tmux--handle-line' may reset
-      ;; `ghostel-tmux--line-buffer' under our feet — re-check the
-      ;; buffer length before every match so a stale IDX can't index
-      ;; past the emptied accumulator.  It may also kill BUFFER: the
-      ;; buffer current then can be another controller.
-      (unwind-protect
-          (while (and (buffer-live-p buffer)
-                      (<= idx (length ghostel-tmux--line-buffer))
-                      (string-match "\r*\n" ghostel-tmux--line-buffer idx))
-            (let ((line (substring ghostel-tmux--line-buffer
-                                   idx (match-beginning 0))))
-              (setq idx (match-end 0))
-              ;; A line that fails must not stop the ones after it.
-              (condition-case err
-                  (ghostel-tmux--handle-line line)
-                (error
-                 (message "Ghostel-tmux: Error handling %S: %s"
-                          (truncate-string-to-width line 60)
-                          (error-message-string err))))))
-        (when (buffer-live-p buffer)
+  (unless (memq (current-buffer) ghostel-tmux--in-feed)
+    ;; Strip the DCS preamble `\eP1000p' if we haven't seen it yet.
+    (when (eq ghostel-tmux--parser-state 'preamble)
+      (let ((p (string-match-p "\eP1000p" ghostel-tmux--line-buffer)))
+        (when p
           (setq ghostel-tmux--line-buffer
-                (if (<= idx (length ghostel-tmux--line-buffer))
-                    (substring ghostel-tmux--line-buffer idx)
-                  "")))))))
+                (substring ghostel-tmux--line-buffer (+ p 7)))
+          (setq ghostel-tmux--parser-state 'idle))))
+    (when (eq ghostel-tmux--parser-state 'preamble)
+      ;; `tmux -C' sends no DCS: a `%' at line-start switches to idle.
+      ;; Anything before that `%' is dispatched as idle lines, where
+      ;; non-protocol lines are dropped.
+      (when (string-match-p "^%" ghostel-tmux--line-buffer)
+        (setq ghostel-tmux--parser-state 'idle)))
+    (when (memq ghostel-tmux--parser-state '(idle block))
+      (let ((buffer (current-buffer))
+            (idx 0)
+            (ghostel-tmux--in-feed (cons (current-buffer)
+                                         ghostel-tmux--in-feed)))
+        ;; `ghostel-tmux--handle-line' may reset
+        ;; `ghostel-tmux--line-buffer' under our feet — re-check the
+        ;; buffer length before every match so a stale IDX can't index
+        ;; past the emptied accumulator.  It may also kill BUFFER: the
+        ;; buffer current then can be another controller.
+        (unwind-protect
+            (while (and (buffer-live-p buffer)
+                        (<= idx (length ghostel-tmux--line-buffer))
+                        (string-match "\r*\n" ghostel-tmux--line-buffer idx))
+              (let ((line (substring ghostel-tmux--line-buffer
+                                     idx (match-beginning 0))))
+                (setq idx (match-end 0))
+                ;; A line that fails must not stop the ones after it.
+                (condition-case err
+                    (ghostel-tmux--handle-line line)
+                  (error
+                   (message "Ghostel-tmux: Error handling %S: %s"
+                            (truncate-string-to-width line 60)
+                            (error-message-string err))))))
+          (when (buffer-live-p buffer)
+            (setq ghostel-tmux--line-buffer
+                  (if (<= idx (length ghostel-tmux--line-buffer))
+                      (substring ghostel-tmux--line-buffer idx)
+                    ""))))))))
 
 (defun ghostel-tmux--decode-text (text)
   "Return TEXT from the wire, which is UTF-8 bytes, as text."
@@ -504,7 +534,12 @@ Splits on newlines, dispatches per-line via the state machine."
             (list :time (match-string 1 line)
                   :cmd (match-string 2 line)
                   :flags (match-string 3 line))))
-     (t (ghostel-tmux--dispatch-notification line))))))
+     (t
+      (ghostel-tmux--dispatch-notification line)
+      (when (and ghostel-tmux-notification-functions
+                 (not (string-match-p "\\`%\\(?:extended-\\)?output " line)))
+        (ghostel-tmux--run-hook 'ghostel-tmux-notification-functions
+                                (ghostel-tmux--decode-text line))))))))
 
 (defun ghostel-tmux--handle-block-line (line)
   "Inside a block, check LINE against the terminator and otherwise accumulate.
@@ -617,7 +652,9 @@ auto-takeover host; pane buffers are sealed read-only or killed, see
         (setq ghostel-tmux--dcs-active nil)
         (ghostel-tmux--exit-control-mode controller)
         ;; An empty line makes tmux leave control mode and close the DCS.
-        (ghostel-send-string "\n" t))
+        (when (buffer-live-p controller)
+          (with-current-buffer controller
+            (ghostel-send-string "\n" t))))
        (t
         (when (and ghostel-tmux--controller-process
                    (process-live-p ghostel-tmux--controller-process))
@@ -1400,6 +1437,28 @@ every tab and non-ASCII character of the row as `_'."
           (match-string 5 line)
           (match-string 6 line))))
 
+(defun ghostel-tmux--run-hook (hook &rest args)
+  "Run HOOK with ARGS; an error of one of its functions is reported.
+The other functions still run.  The current buffer stays, whatever the
+functions select, as long as it is live."
+  (run-hook-wrapped
+   hook
+   (lambda (function)
+     (condition-case err
+         (save-current-buffer
+           (apply function args))
+       (error
+        (message "Ghostel-tmux: Error in %s: %s"
+                 hook (error-message-string err))))
+     nil)))
+
+(defun ghostel-tmux--run-attach-hook ()
+  "Run `ghostel-tmux-attach-hook' in this controller.
+Waits for the minibuffer to close, see `ghostel-tmux--hold'."
+  (when (and ghostel-tmux-attach-hook
+             (not (ghostel-tmux--hold #'ghostel-tmux--run-attach-hook)))
+    (ghostel-tmux--run-hook 'ghostel-tmux-attach-hook)))
+
 (defun ghostel-tmux--receive-window-rows (output &optional seed)
   "Parse `list-windows' OUTPUT and create/update windows + panes.
 Each row is `@WID<TAB>%ACTIVE-PANE<TAB>CURRENT<TAB>WINDOW-NAME<TAB>LAYOUT
@@ -1411,7 +1470,8 @@ is not to follow the active pane.  The window of
 `ghostel-tmux--auto-host-window' keeps such a pane, and tmux switches to it,
 or shows the active one; the window of an attach does so only while it shows
 the buffer it showed then.  The attach is reported as done while the echo
-area still says that it started.  Later changes arrive as notifications."
+area still says that it started, and `ghostel-tmux-attach-hook' runs last.
+Later changes arrive as notifications."
   (let ((rows (delq nil (mapcar #'ghostel-tmux--parse-window-row
                                 (split-string output "\n" t))))
         (kept (and seed ghostel-tmux--auto-host-window))
@@ -1432,9 +1492,8 @@ area still says that it started.  Later changes arrive as notifications."
       (setq ghostel-tmux--active-pane-id active-pane))
     (when seed
       ;; Only in place of the attach's own message.
-      (when (and ghostel-tmux--auto-host-buffer
-                 (string-prefix-p ghostel-tmux--attaching-message
-                                  (or (current-message) "")))
+      (when (string-prefix-p ghostel-tmux--attaching-message
+                             (or (current-message) ""))
         (message "Ghostel-tmux: Attached to %s" ghostel-tmux--session-name))
       (ghostel-tmux--fill-kept-window kept))
     ;; All of the session's windows, in tmux's order; a window linked
@@ -1442,7 +1501,9 @@ area still says that it started.  Later changes arrive as notifications."
     (when rows
       (setq ghostel-tmux--window-order (delete-dups (mapcar #'car rows))))
     (when (assq ghostel-tmux--current-window-id rows)
-      (ghostel-tmux--leave-floating-window))))
+      (ghostel-tmux--leave-floating-window))
+    (when seed
+      (ghostel-tmux--run-attach-hook))))
 
 (defun ghostel-tmux--fill-kept-window (kept)
   "Show a pane in KEPT, the window kept for the rows of the session.
@@ -1771,6 +1832,9 @@ no further use and goes away."
                                   (not (file-remote-p default-directory))
                                   (ghostel-tmux--session-exists-p
                                    ghostel-tmux--session-name)))))))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (ghostel-tmux--run-hook 'ghostel-tmux-detach-hook)))
       (ghostel-tmux--seal-panes buf alive)
       (when (buffer-live-p buf)
         (with-current-buffer buf
@@ -1827,8 +1891,9 @@ ON-DONE then without arguments."
      (format "%s\ndisplay-message -p %s" command ghostel-tmux--typed-reply-end)
      cont)))
 
-(defun ghostel-tmux--queue-typed-command (command)
-  "Queue COMMAND, written by the user, and show what tmux answers."
+(defun ghostel-tmux--queue-collecting (command function)
+  "Queue COMMAND and call FUNCTION with all that tmux answers to it.
+FUNCTION gets two lists: the texts of the reply blocks, and of the errors."
   (let (outputs errors)
     (ghostel-tmux--queue-until-marker
      command
@@ -1837,7 +1902,14 @@ ON-DONE then without arguments."
            (push output outputs)
          (push ghostel-tmux--reply-error errors)))
      (lambda ()
-       (ghostel-tmux--show-reply command (reverse outputs) (reverse errors))))))
+       (funcall function (reverse outputs) (reverse errors))))))
+
+(defun ghostel-tmux--queue-typed-command (command)
+  "Queue COMMAND, written by the user, and show what tmux answers."
+  (ghostel-tmux--queue-collecting
+   command
+   (lambda (outputs errors)
+     (ghostel-tmux--show-reply command outputs errors))))
 
 (defun ghostel-tmux--cmd (command &optional typed)
   "Run tmux command-mode COMMAND through the active controller.
@@ -3276,12 +3348,15 @@ Tears down control-mode state and reverts the host buffer to a
 plain shell.  A frame ending without `%exit' was cut short by an ESC in
 a reply while tmux stays attached: an empty line makes it leave."
   (when ghostel-tmux--dcs-active
-    (let ((closing ghostel-tmux--closing))
+    (let ((closing ghostel-tmux--closing)
+          (host (current-buffer)))
       (setq ghostel-tmux--dcs-active nil)
-      (ghostel-tmux--exit-control-mode (current-buffer))
+      (ghostel-tmux--exit-control-mode host)
       (when (and (not closing)
-                 (process-live-p (get-buffer-process (current-buffer))))
-        (ghostel-send-string "\n" t)))))
+                 (buffer-live-p host)
+                 (process-live-p (get-buffer-process host)))
+        (with-current-buffer host
+          (ghostel-send-string "\n" t))))))
 
 (defun ghostel-tmux--reset-session-state ()
   "Forget the parser, the command queue and the session's windows."
@@ -3347,7 +3422,19 @@ Any windows showing pane buffers are returned to the host buffer so the
 user lands back at the shell, and the pane buffers are sealed as
 read-only snapshots or killed, see `ghostel-tmux-keep-detached-panes'.
 Windows that show sealed panes again when a minibuffer has closed are
-returned once more, see `ghostel-tmux--hold'."
+returned once more, see `ghostel-tmux--hold'.  A function of
+`ghostel-tmux-detach-hook' may kill BUF: its panes are then sealed or
+killed as for a host that was killed."
+  (let ((detaching (buffer-local-value 'ghostel-tmux--detaching buf)))
+    (with-current-buffer buf
+      (remove-hook 'kill-buffer-hook #'ghostel-tmux--host-killed t)
+      (ghostel-tmux--run-hook 'ghostel-tmux-detach-hook))
+    (if (buffer-live-p buf)
+        (ghostel-tmux--restore-host buf)
+      (ghostel-tmux--seal-panes buf detaching))))
+
+(defun ghostel-tmux--restore-host (buf)
+  "Make BUF, the host of a takeover that ended, a plain shell buffer again."
   (with-current-buffer buf
     (ghostel-tmux--tile-dissolve buf t)
     (let (pane-buffers)
@@ -3367,7 +3454,6 @@ returned once more, see `ghostel-tmux--hold'."
           ghostel-tmux--panes nil
           ghostel-tmux--windows nil)
     (remove-hook 'ghostel-exit-functions #'ghostel-tmux--host-exited t)
-    (remove-hook 'kill-buffer-hook #'ghostel-tmux--host-killed t)
     (remove-hook 'window-buffer-change-functions #'ghostel-tmux--hide-host t)
     ;; Restore the host buffer's original (visible) name, if we renamed
     ;; it during entry to hide it from the user-visible buffer list.
@@ -3429,7 +3515,12 @@ in a dedicated window."
 (defun ghostel-tmux--host-killed ()
   "Seal or kill the panes of this auto-takeover host, whose buffer is being killed.
 `ghostel-exit-functions' does not run for a buffer that is gone."
-  (ghostel-tmux--seal-panes (current-buffer) ghostel-tmux--detaching))
+  (let ((host (current-buffer))
+        (detaching ghostel-tmux--detaching))
+    ;; A function of the hook may kill the host itself.
+    (remove-hook 'kill-buffer-hook #'ghostel-tmux--host-killed t)
+    (ghostel-tmux--run-hook 'ghostel-tmux-detach-hook)
+    (ghostel-tmux--seal-panes host detaching)))
 
 
 ;; Public commands
@@ -3533,13 +3624,13 @@ a window fills it, and a controller fills the window it claimed last."
     (setq ghostel-tmux--auto-host-window window
           ghostel-tmux--auto-host-buffer (window-buffer window))))
 
-(defun ghostel-tmux--reuse-controller (session)
+(defun ghostel-tmux--reuse-controller (session &optional no-display)
   "Show the session named SESSION when a controller is attached to it.
 That is a live dedicated controller on `ghostel-tmux--server' and the
-host of `default-directory'.  The selected window waits for its
-active pane like the window of an attach, and tmux is asked for the
-session's windows again unless the first answer is still to come.
-Return the controller, or nil."
+host of `default-directory'.  Unless NO-DISPLAY, the selected window
+waits for its active pane like the window of an attach.  tmux is asked
+for the session's windows again unless the first answer is still to
+come.  Return the controller, or nil."
   (let* ((server (or ghostel-tmux--server (ghostel-tmux--resolve-server)))
          (host (file-remote-p default-directory))
          (controller
@@ -3555,13 +3646,14 @@ Return the controller, or nil."
            (buffer-list))))
     (when controller
       (with-current-buffer controller
-        (ghostel-tmux--claim-selected-window)
+        (unless no-display
+          (ghostel-tmux--claim-selected-window))
         ;; `--on-session-changed' asks for the first rows.
         (when ghostel-tmux--session-id
           (ghostel-tmux--request-window-rows t))))
     controller))
 
-(defun ghostel-tmux--spawn-controller (session tmux-args)
+(defun ghostel-tmux--spawn-controller (session tmux-args &optional no-display)
   "Spawn a `tmux -C' subprocess on a pipe as a controller buffer.
 SESSION is the user-visible session label.  TMUX-ARGS is the list
 of arguments after \"tmux -C\".  `-u' keeps non-ASCII text intact in
@@ -3569,8 +3661,9 @@ any locale.  A remote `default-directory' runs tmux on that host.
 A remote tmux can get a terminal, as from TRAMP's direct async
 processes: raw mode keeps it from echoing commands and from cutting
 long lines.  tmux is `ghostel-tmux--server', which the controller
-buffer keeps.  The selected window waits for tmux's active pane while
-it shows the same buffer.  Returns the controller buffer."
+buffer keeps.  Unless NO-DISPLAY, the selected window waits for tmux's
+active pane while it shows the same buffer.  Returns the controller
+buffer."
   (let* ((server (or ghostel-tmux--server (ghostel-tmux--resolve-server)))
          (command `(,(car server) "-u" ,@(cdr server) "-C" ,@tmux-args))
          (control-buf (generate-new-buffer
@@ -3595,7 +3688,8 @@ it shows the same buffer.  Returns the controller buffer."
                         :sentinel #'ghostel-tmux--sentinel)))
             ;; TRAMP sets the coding of its connection after `:coding'.
             (set-process-coding-system proc 'binary 'binary)
-            (ghostel-tmux--claim-selected-window)
+            (unless no-display
+              (ghostel-tmux--claim-selected-window))
             (setq ghostel-tmux--controller-process proc
                   ghostel-tmux--session-name session)))
       ((error quit)
@@ -3828,35 +3922,38 @@ tmux leaves a run of `#' before `[' as it is, as a style."
    string t t))
 
 ;;;###autoload
-(defun ghostel-tmux-attach (session &optional socket)
+(defun ghostel-tmux-attach (session &optional socket no-display)
   "Attach to the tmux SESSION via control mode and materialize its panes.
 SESSION is an exact name.  tmux cannot address a name that starts with
 `$' or contains `:' this way.  A non-nil SOCKET is used instead of
 `ghostel-tmux-socket'; interactively, a prefix argument prompts for it.
 Returns the controller buffer before any pane is there: tmux's active
 pane takes the selected window once tmux reports it, unless the window
-shows another buffer by then.  A session that this command or
-`ghostel-tmux-new' is attached to already is not attached again: the
-selected window shows it, and its controller is returned."
+shows another buffer by then.  With NO-DISPLAY non-nil, no window is
+to show it.  A session that this command or `ghostel-tmux-new' is
+attached to already is not attached again: its controller is returned,
+and the selected window shows the session unless NO-DISPLAY.
+`ghostel-tmux-attach-hook' runs once the session's panes are there."
   (interactive
    (let* ((socket (ghostel-tmux--read-socket))
           (ghostel-tmux--server (ghostel-tmux--resolve-server socket)))
      (list (ghostel-tmux--read-session) socket)))
   (ghostel-tmux--check-spawn)
   (let ((ghostel-tmux--server (ghostel-tmux--resolve-server socket)))
-    (or (ghostel-tmux--reuse-controller session)
-        (ghostel-tmux--spawn-controller session
-                                        (ghostel-tmux--attach-args session)))))
+    (or (ghostel-tmux--reuse-controller session no-display)
+        (ghostel-tmux--spawn-controller
+         session (ghostel-tmux--attach-args session) no-display))))
 
 ;;;###autoload
-(defun ghostel-tmux-new (session &optional socket)
+(defun ghostel-tmux-new (session &optional socket no-display)
   "Create or attach to tmux SESSION via control mode.
 An existing session is attached like in `ghostel-tmux-attach', as
 `new-session -A' reaches it by a raw target;
 otherwise `tmux -C new-session -As' creates it.
 A non-nil SOCKET is used instead of `ghostel-tmux-socket'.
 Interactively, a prefix argument prompts for it.
-Returns before any pane is there, like `ghostel-tmux-attach'."
+Returns before any pane is there; NO-DISPLAY is as in
+`ghostel-tmux-attach'."
   (interactive
    (let ((socket (ghostel-tmux--read-socket)))
      (list (read-string "tmux session name: " "main") socket)))
@@ -3864,24 +3961,27 @@ Returns before any pane is there, like `ghostel-tmux-attach'."
     (user-error "Ghostel-tmux: Empty session name"))
   (ghostel-tmux--check-spawn)
   (let ((ghostel-tmux--server (ghostel-tmux--resolve-server socket)))
-    (or (ghostel-tmux--reuse-controller session)
+    (or (ghostel-tmux--reuse-controller session no-display)
         (ghostel-tmux--spawn-controller
          session
          (if (ghostel-tmux--session-exists-p session)
              (ghostel-tmux--attach-args session)
            ;; tmux expands `-s' as a format.
-           (list "new-session" "-As" (ghostel-tmux--literal-format session)))))))
+           (list "new-session" "-As" (ghostel-tmux--literal-format session)))
+         no-display))))
 
-(defun ghostel-tmux-detach (&optional keep)
-  "Detach the current tmux session.
+(defun ghostel-tmux-detach (&optional keep buffer)
+  "Detach the tmux session of BUFFER, by default the current buffer.
 For sessions started via `ghostel-tmux-attach' or `ghostel-tmux-new',
 kills the dedicated control-mode subprocess.  For sessions taken over
 from an existing ghostel shell (takeover), sends `detach-client' and lets
 tmux exit control mode cleanly so the underlying shell continues running.
 The pane buffers go, see `ghostel-tmux-keep-detached-panes'; with KEEP
-non-nil, interactively a prefix argument, they stay read-only."
+non-nil, interactively a prefix argument, they stay read-only.  BUFFER
+is a pane buffer or the session's controller."
   (interactive "P")
-  (let ((controller (ghostel-tmux--active-controller)))
+  (let ((controller (with-current-buffer (or buffer (current-buffer))
+                      (ghostel-tmux--active-controller))))
     (unless (buffer-live-p controller)
       (user-error "Ghostel-tmux: No active controller for this buffer"))
     (with-current-buffer controller
@@ -4132,6 +4232,157 @@ A nil OUTPUT is a failed capture.  LABEL names the server in errors."
         (ghostel-write-output (ghostel-tmux--backfill-rows rows) t)
         (setq ghostel-tmux--initialized t))
       (pop-to-buffer buf))))
+
+
+;; Functions for packages that build on this one
+
+(defun ghostel-tmux--buffer-value (variable buffer)
+  "Return the value of VARIABLE in BUFFER, by default the current buffer.
+Return nil for anything but a live buffer."
+  (let ((buffer (or buffer (current-buffer))))
+    (and (buffer-live-p buffer)
+         (buffer-local-value variable buffer))))
+
+(defun ghostel-tmux-controller (&optional buffer)
+  "Return the controller buffer of BUFFER's tmux session, or nil.
+BUFFER is a pane buffer or a controller and defaults to the current
+buffer.  A controller stands for the session its tmux client is
+attached to; `ghostel-tmux-attach' and `ghostel-tmux-new' return it.  A
+pane buffer kept after its session was detached has none."
+  (let ((controller (ghostel-tmux--buffer-value
+                     'ghostel-tmux--controller-buffer buffer)))
+    (cond
+     ((buffer-live-p controller) controller)
+     ((ghostel-tmux--buffer-value 'ghostel-tmux--panes buffer)
+      (or buffer (current-buffer))))))
+
+(defun ghostel-tmux-controllers ()
+  "Return the controllers of the tmux sessions attached in this Emacs."
+  (cl-remove-if-not
+   (lambda (buffer)
+     (with-current-buffer buffer
+       (and ghostel-tmux--panes (ghostel-tmux--controller-live-p))))
+   (buffer-list)))
+
+(defun ghostel-tmux--id-string (prefix id)
+  "Return tmux's name for ID, a number, after PREFIX; nil without ID."
+  (and id (format "%s%d" prefix id)))
+
+(defun ghostel-tmux-session-id (&optional buffer)
+  "Return tmux's id of BUFFER's session, such as \"$3\", or nil.
+tmux reports it soon after an attach.  BUFFER is as for
+`ghostel-tmux-controller'."
+  (when-let* ((controller (ghostel-tmux-controller buffer)))
+    (ghostel-tmux--id-string
+     "$" (buffer-local-value 'ghostel-tmux--session-id controller))))
+
+(defun ghostel-tmux-session-name (&optional buffer)
+  "Return the name of BUFFER's tmux session, or nil.
+tmux reports it soon after an attach.  BUFFER is as for
+`ghostel-tmux-controller'."
+  (when-let* ((controller (ghostel-tmux-controller buffer))
+              ((buffer-local-value 'ghostel-tmux--session-id controller)))
+    (buffer-local-value 'ghostel-tmux--session-name controller)))
+
+(defun ghostel-tmux-pane-id (&optional buffer)
+  "Return tmux's id of the pane of BUFFER, such as \"%5\", or nil.
+BUFFER is a pane buffer and defaults to the current buffer."
+  (ghostel-tmux--id-string
+   "%" (ghostel-tmux--buffer-value 'ghostel-tmux--pane-id buffer)))
+
+(defun ghostel-tmux-window-id (&optional buffer)
+  "Return tmux's id of the window of BUFFER's pane, such as \"@1\", or nil.
+BUFFER is a pane buffer and defaults to the current buffer."
+  (ghostel-tmux--id-string
+   "@" (ghostel-tmux--buffer-value 'ghostel-tmux--window-id buffer)))
+
+(defun ghostel-tmux-panes (&optional buffer)
+  "Return the pane buffers of BUFFER's tmux session, in tmux's order.
+BUFFER is as for `ghostel-tmux-controller'."
+  (when-let* ((controller (ghostel-tmux-controller buffer)))
+    (ghostel-tmux--pane-list controller)))
+
+(defun ghostel-tmux-pane-buffer (pane-id &optional buffer)
+  "Return the buffer of pane PANE-ID in BUFFER's tmux session, or nil.
+PANE-ID is tmux's id, such as \"%5\", or its number.  A pane tmux has
+just made gets its buffer with the next layout tmux reports, and
+`ghostel-tmux-pane-mode-hook' runs in it.  BUFFER is as for
+`ghostel-tmux-controller'."
+  (when-let* ((controller (ghostel-tmux-controller buffer))
+              (id (cond
+                   ((integerp pane-id) pane-id)
+                   ((and (stringp pane-id)
+                         (string-match "\\`%?\\([0-9]+\\)\\'" pane-id))
+                    (string-to-number (match-string 1 pane-id)))))
+              (pane (gethash id (buffer-local-value 'ghostel-tmux--panes
+                                                    controller))))
+    (and (buffer-live-p pane) pane)))
+
+(defun ghostel-tmux-active-pane (&optional buffer)
+  "Return the buffer of the active pane of BUFFER's tmux session, or nil.
+That is the active pane of the session's current window.  A floating
+pane has no buffer: the result is the pane shown in its place, if any.
+BUFFER is as for `ghostel-tmux-controller'."
+  (when-let* ((controller (ghostel-tmux-controller buffer))
+              (id (buffer-local-value 'ghostel-tmux--active-pane-id
+                                      controller)))
+    (ghostel-tmux-pane-buffer id controller)))
+
+(defun ghostel-tmux-window-split (&optional window)
+  "Return the windows of the split that WINDOW is part of, or nil.
+That is a split showing the panes of a tmux window, see
+`ghostel-tmux-split-windows'; a window of it may show another buffer.
+WINDOW defaults to the selected window."
+  (when-let* ((tile (ghostel-tmux--tile-leaf (or window (selected-window)))))
+    (ghostel-tmux--tile-windows (nth 0 tile) (nth 1 tile))))
+
+(defun ghostel-tmux-select-pane (pane)
+  "Switch to the tmux pane of the buffer PANE, in tmux and in Emacs.
+A visible window showing PANE is selected, else the selected window
+shows it, as a split when its tmux window has several panes, see
+`ghostel-tmux-split-windows'.  While a minibuffer is open, this waits
+for it to close."
+  (unless (and (ghostel-tmux-pane-id pane) (ghostel-tmux-controller pane))
+    (user-error "Ghostel-tmux: %s is not a pane of an attached session" pane))
+  (with-current-buffer (ghostel-tmux-controller pane)
+    (unless (ghostel-tmux--hold #'ghostel-tmux-select-pane pane)
+      (ghostel-tmux--select-pane-buffer pane))))
+
+(defun ghostel-tmux-command (command &optional callback buffer)
+  "Send COMMAND to tmux, in the session of BUFFER.
+COMMAND is what tmux's command prompt takes: a command, several joined
+with `;', or one per line.  CALLBACK is called once tmux has answered
+all of it, in the session's controller buffer, with two arguments: the
+text the commands printed, and tmux's error message if one failed, else
+nil.  Without CALLBACK, a failure is reported in the echo area.
+CALLBACK runs from a process filter.  When tmux leaves before it
+answers, CALLBACK is not called, and `ghostel-tmux-detach-hook' runs.
+A command must not print just `ghostel-tmux-reply-end', which ends the
+answer.
+Detach with `ghostel-tmux-detach', not with a command.  BUFFER is as
+for `ghostel-tmux-controller'."
+  (let ((controller (ghostel-tmux-controller buffer))
+        ;; An empty line makes tmux leave control mode.
+        (lines (split-string command "\n" t "[ \t]+")))
+    (unless (and controller
+                 (with-current-buffer controller
+                   (and (ghostel-tmux--controller-live-p)
+                        (not ghostel-tmux--closing))))
+      (user-error "Ghostel-tmux: No attached session"))
+    (unless lines
+      (user-error "Ghostel-tmux: Empty command"))
+    (with-current-buffer controller
+      (ghostel-tmux--queue-collecting
+       (string-join lines "\n")
+       (lambda (outputs errors)
+         (let ((output (ghostel-tmux--decode-text
+                        (string-join (cl-remove-if #'string-empty-p outputs)
+                                     "\n")))
+               (failure (and errors (string-join errors "\n"))))
+           (cond
+            (callback (funcall callback output failure))
+            (failure (ghostel-tmux--report-failure command failure)))))))
+    nil))
 
 (provide 'ghostel-tmux)
 

@@ -230,6 +230,71 @@ on takeover and when the pane shown goes away, Emacs moves the session to a
 window with a tiled pane.  A takeover that starts in a session with no tiled pane
 at all stays on the hidden shell.
 
+* For other packages
+
+A package can attach sessions, find their panes and talk to tmux through the
+functions below.  A session is named by its /controller/, the hidden buffer
+that =ghostel-tmux-attach= and =ghostel-tmux-new= return; where a function
+takes a BUFFER, that is a controller or one of its pane buffers, by default
+the current buffer.  A takeover's controller is the shell buffer =tmux -CC=
+was typed in.
+
+A pane buffer is a ghostel buffer.  Showing it in a window, by whatever
+command, fits its terminal to the window and tells tmux; a pane of a tmux
+window of several panes brings their split with it, see [[*Split windows][Split windows]].
+=ghostel-send-string= in it types into the pane.
+
+| Function                                         | What it does                                                                     |
+|--------------------------------------------------+----------------------------------------------------------------------------------|
+| =(ghostel-tmux-attach SESSION SOCKET NO-DISPLAY)= | Attach and return the controller, at once.  With NO-DISPLAY, no window is to show the session.  =ghostel-tmux-new= takes the same arguments. |
+| =(ghostel-tmux-detach KEEP BUFFER)=                | Detach the session.                                                              |
+| =(ghostel-tmux-controllers)=                       | The controllers of the sessions attached in this Emacs.                          |
+| =(ghostel-tmux-controller BUFFER)=                 | The controller of BUFFER's session, =nil= for any other buffer and for a pane kept after a detach. |
+| =(ghostel-tmux-session-name BUFFER)=, =(ghostel-tmux-session-id BUFFER)= | The session's name, and tmux's id of it, such as ="$3"=, once tmux has reported them. |
+| =(ghostel-tmux-panes BUFFER)=                      | The session's pane buffers, in tmux's order.                                     |
+| =(ghostel-tmux-pane-buffer PANE-ID BUFFER)=        | The buffer of a pane, by tmux's id of it, such as ="%5"=.                          |
+| =(ghostel-tmux-active-pane BUFFER)=                | The buffer of the active pane of the session's current window.                   |
+| =(ghostel-tmux-pane-id PANE)=, =(ghostel-tmux-window-id PANE)= | tmux's ids of the pane and of its tmux window, such as ="%5"= and ="@1"=. |
+| =(ghostel-tmux-window-split WINDOW)=               | The windows of the split of a tmux window that WINDOW is part of, or =nil=.        |
+| =(ghostel-tmux-select-pane PANE)=                  | Switch to the pane in tmux, and select a window showing it or show it in the selected one. |
+| =(ghostel-tmux-command COMMAND CALLBACK BUFFER)=   | Send tmux a command line.  CALLBACK gets what it printed and tmux's error message, or =nil=. |
+
+Panes arrive after the attach has returned, and tmux makes and ends them at
+any time, so a package follows them through hooks.  All but the first run in
+the controller buffer:
+
+| Hook                                  | Runs                                                                                  |
+|---------------------------------------+---------------------------------------------------------------------------------------|
+| =ghostel-tmux-pane-mode-hook=           | In a pane buffer that was made, or made live again by an attach; a pane that ends has its buffer killed (=kill-buffer-hook=).  Also in a buffer of =ghostel-tmux-capture=, which is no pane of a session. |
+| =ghostel-tmux-attach-hook=              | When tmux has listed the session's windows: after an attach, also to a session attached already, and after the client switched to another session, for which no detach hook runs.  No minibuffer is open then, so a function may change windows. |
+| =ghostel-tmux-detach-hook=              | When the tmux client ends, also after an attach that failed, while the session's pane buffers are still there. |
+| =ghostel-tmux-notification-functions=   | For each notification of tmux's control mode except pane output, with the line as its argument, such as ="%window-renamed @1 name"=. |
+
+=ghostel-tmux-command= takes a command that answers with several replies
+or none, but detaching is for =ghostel-tmux-detach=.  A callback is not
+called when tmux leaves first; the detach hook runs then.  An attach
+says that it started and that it is done in the echo area, and neither
+with =inhibit-message= bound around the call.  With tmux's
+=refresh-client -B=, a package gets =%subscription-changed= notifications
+for the formats it wants to follow.
+
+#+begin_src emacs-lisp
+;; Attach in the background, and show the session once its panes are there.
+(defvar my-controller (ghostel-tmux-attach "work" nil t))
+
+(add-hook 'ghostel-tmux-attach-hook
+          (lambda ()
+            (when-let* (((eq (current-buffer) my-controller))
+                        (pane (ghostel-tmux-active-pane)))
+              (ghostel-tmux-select-pane pane))))
+
+;; Ask tmux for something.
+(ghostel-tmux-command "display-message -p '#{socket_path}'"
+                      (lambda (output failure)
+                        (message "%s" (or failure output)))
+                      my-controller)
+#+end_src
+
 * Customization
 
 | Option                              | Effect                                                                              |
