@@ -165,10 +165,10 @@ Nushell prints the time at the right edge of its prompt row."
                     (file-name-directory (locate-library "ghostel-tmux"))))
 
 (defun elate-tmux-asking-p (prompt)
-  "Non-nil when the minibuffer is open with PROMPT."
+  "Non-nil when the minibuffer is open with a prompt that starts with PROMPT."
   (when-let* ((w (active-minibuffer-window)))
     (with-current-buffer (window-buffer w)
-      (equal (minibuffer-prompt) prompt))))
+      (string-prefix-p prompt (minibuffer-prompt)))))
 
 (defun elate-tmux-rows-p (start)
   "Non-nil when the pane shows the numbers from START on all rows but the last."

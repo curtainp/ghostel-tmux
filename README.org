@@ -18,11 +18,12 @@ tabs in the tab line.
 | Command                                         | What it does                                                                            |
 |-------------------------------------------------+-----------------------------------------------------------------------------------------|
 | =M-x ghostel-tmux-new=                            | Create or attach to a session by name.                                                   |
-| =M-x ghostel-tmux-attach=                         | Pick a running session via =completing-read= and attach.                                 |
+| =M-x ghostel-tmux-attach=                         | Attach to the session =tmux attach= would pick: the most recently used one without a client, else the most recently used.  With =C-u=, pick the session via =completing-read=. |
 | =M-x ghostel-tmux-detach=                         | Detach the current session.  Its pane buffers go, with =C-u= they stay; see =ghostel-tmux-keep-detached-panes=. |
 | =M-x ghostel-tmux-capture=                        | One-shot snapshot: dump a single pane's scrollback into a fresh buffer (no live link).  |
 | =M-x ghostel-tmux-next-pane= / =ghostel-tmux-prev-pane= | Cycle through sibling panes, across tmux windows (=C-t C-n= / =C-t C-p=).              |
-| =M-x ghostel-tmux-switch-pane=                    | =completing-read= picker over sibling panes (=C-t s=).                                    |
+| =M-x ghostel-tmux-switch-pane=                    | =completing-read= picker over sibling panes (=C-t w=).                                    |
+| =M-x ghostel-tmux-switch-session=                 | =completing-read= picker over the server's other sessions (=C-t s=).                      |
 | =M-x ghostel-tmux-restore-split=                  | Split the window's tmux window again as tmux lays it out (=C-t r=).                      |
 | =M-x ghostel-tmux-reset=                          | Escape hatch: reset tmux state when the protocol parser is wedged.                      |
 
@@ -32,11 +33,15 @@ tmux server started this way keeps the environment of TRAMP's shell, such as
 =PAGER=cat=; start the server on the host first to avoid that.
 
 A session that =ghostel-tmux-new= or =ghostel-tmux-attach= is attached to already
-gets no second client: the selected window shows it.
+gets no second client: the selected window shows it.  =C-t s= moves the client
+to another session, whose panes take the place of the ones shown; a session
+picked there that is attached in this Emacs already is shown instead, and no
+client moves.
 
 =ghostel-tmux-socket= selects a tmux server other than the default one.  With a
-prefix argument, =ghostel-tmux-new=, =ghostel-tmux-attach= and
-=ghostel-tmux-capture= prompt for it, and an empty answer is the default server.
+prefix argument, =ghostel-tmux-new= and =ghostel-tmux-capture= prompt for it,
+=ghostel-tmux-attach= with two (=C-u C-u=), and an empty answer is the default
+server.
 In a pane buffer of a live session, =ghostel-tmux-capture= asks that session's
 tmux, also in the takeover.  A path is on the host of =default-directory=, which
 also reaches a server whose =TMUX_TMPDIR= is not set in TRAMP's shell.  The
@@ -144,7 +149,11 @@ over the active session, so they work the same whether you started tmux via
 | =C-t o=        | =select-pane=           | Next pane of the window.                     |
 | =C-t C-n=      | -                     | Next pane in tab order, across windows.      |
 | =C-t C-p=      | -                     | Previous pane in tab order, across windows.  |
-| =C-t s=        | -                     | Pick a pane with =completing-read=.          |
+| =C-t w=        | -                     | Pick a pane with =completing-read=.          |
+| =C-t s=        | =switch-client -t=      | Pick a session with =completing-read=.       |
+| =C-t (=        | =switch-client -p=      | Switch to the previous session.              |
+| =C-t )=        | =switch-client -n=      | Switch to the next session.                  |
+| =C-t L=        | =switch-client -l=      | Switch to the session used last.             |
 | =C-t r=        | -                     | Split the window again as tmux lays it out.  |
 | =C-t ,=        | =rename-window=         | Prompt and rename the current window.       |
 | =C-t $=        | =rename-session=        | Prompt and rename the current session.      |
@@ -200,7 +209,7 @@ Pane buffers have a tab line with a tab per tmux window.  Click a tab to show
 that window in the Emacs window clicked, or where Emacs shows it already, or
 hit =C-t n= / =C-t p=.  A split has one tab line over its top row of windows,
 each showing its part, and no tab line further down.  =C-t C-n= / =C-t C-p=
-and =C-t s= go to a pane of any window.
+and =C-t w= go to a pane of any window.
 
 With =ghostel-tmux-split-windows= nil, the tabs are the session's panes, and a
 click switches panes in the same window.

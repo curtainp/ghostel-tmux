@@ -2074,6 +2074,18 @@ The visible switch happens reactively in `--on-session-window-changed'."
       (format "rename-session %s" (shell-quote-argument name))))
   "Rename the current tmux session.")
 
+(ghostel-tmux--define-prefix-cmd prev-session "("
+  (lambda (_target) "switch-client -p")
+  "Switch to the previous tmux session.")
+
+(ghostel-tmux--define-prefix-cmd next-session ")"
+  (lambda (_target) "switch-client -n")
+  "Switch to the next tmux session.")
+
+(ghostel-tmux--define-prefix-cmd last-session "L"
+  (lambda (_target) "switch-client -l")
+  "Switch to the tmux session used last.")
+
 (defun ghostel-tmux--prefix-cmd ()
   "Prompt for an arbitrary tmux command, send it and show its output."
   (interactive)
@@ -2099,11 +2111,12 @@ The visible switch happens reactively in `--on-session-window-changed'."
         fn))))
 
 ;; Detach as in tmux, panes in tab order across tmux windows, and the
-;; pane picker.
+;; session and pane pickers.
 (define-key ghostel-tmux-prefix-map (kbd "d") #'ghostel-tmux-detach)
 (define-key ghostel-tmux-prefix-map (kbd "C-n") #'ghostel-tmux-next-pane)
 (define-key ghostel-tmux-prefix-map (kbd "C-p") #'ghostel-tmux-prev-pane)
-(define-key ghostel-tmux-prefix-map (kbd "s") #'ghostel-tmux-switch-pane)
+(define-key ghostel-tmux-prefix-map (kbd "s") #'ghostel-tmux-switch-session)
+(define-key ghostel-tmux-prefix-map (kbd "w") #'ghostel-tmux-switch-pane)
 (define-key ghostel-tmux-prefix-map (kbd "r") #'ghostel-tmux-restore-split)
 
 (defvar ghostel-tmux-pane-repeat-map
@@ -3563,9 +3576,12 @@ These are the connection-local values of `ghostel-tmux-program' and
    (cons ghostel-tmux-program
          (ghostel-tmux--socket-args (or socket ghostel-tmux-socket)))))
 
-(defun ghostel-tmux--read-socket ()
-  "With a prefix argument, prompt for a tmux socket and return it, else nil."
-  (and current-prefix-arg
+(defun ghostel-tmux--read-socket (&optional double)
+  "With a prefix argument, prompt for a tmux socket and return it, else nil.
+With DOUBLE non-nil, that takes two prefix arguments."
+  (and (if double
+           (>= (prefix-numeric-value current-prefix-arg) 16)
+         current-prefix-arg)
        (read-string "tmux socket (name or path, empty for the default): ")))
 
 (defun ghostel-tmux--server-label ()
@@ -3585,20 +3601,61 @@ tmux's text is UTF-8 whatever the locale."
                            "-u" (append (cdr server) args))))
         (cons status (buffer-string))))))
 
-(defun ghostel-tmux--read-session ()
-  "Prompt for a tmux session name and return it.
+(defconst ghostel-tmux--session-rows-format
+  "#{session_id} #{session_attached} #{session_activity} #{session_name}"
+  "The `list-sessions' format `ghostel-tmux--parse-session-rows' parses.")
+
+(defun ghostel-tmux--parse-session-rows (output)
+  "Return the sessions of `list-sessions' OUTPUT as a list of (NAME . ID).
+They are in the order in which tmux would attach them: the sessions without
+a client before the others, and of each the most recently used first.
+tmux tells that time in seconds; of the sessions of one second, the
+newest comes first."
+  (let (rows)
+    (dolist (line (split-string output "\n" t))
+      (when (string-match
+             "\\`\\$\\([0-9]+\\) \\([0-9]+\\) \\([0-9]+\\) \\(.+\\)\\'" line)
+        (push (list (match-string 4 line)
+                    (string-to-number (match-string 1 line))
+                    (equal (match-string 2 line) "0")
+                    (string-to-number (match-string 3 line)))
+              rows)))
+    (mapcar (lambda (row) (cons (nth 0 row) (nth 1 row)))
+            (sort (nreverse rows)
+                  (lambda (a b)
+                    (cond
+                     ((not (eq (nth 2 a) (nth 2 b))) (nth 2 a))
+                     ((/= (nth 3 a) (nth 3 b)) (> (nth 3 a) (nth 3 b)))
+                     (t (> (nth 1 a) (nth 1 b)))))))))
+
+(defun ghostel-tmux--completing-read-session (prompt sessions)
+  "Read one of SESSIONS, a list of names, with PROMPT.
+They are offered in their order, with the first as the default."
+  (completing-read
+   (format-prompt prompt (car sessions))
+   (lambda (string pred action)
+     (if (eq action 'metadata)
+         '(metadata (display-sort-function . identity)
+                    (cycle-sort-function . identity))
+       (complete-with-action action sessions string pred)))
+   nil t nil nil (car sessions)))
+
+(defun ghostel-tmux--read-session (&optional ask)
+  "Return the name of the session tmux would attach.
+That is the first of `ghostel-tmux--parse-session-rows'.  With ASK
+non-nil, prompt for a session, with that one as the default.
 A non-zero exit (no server running) counts as no sessions."
   (let* ((result (ghostel-tmux--process-file
-                  "list-sessions" "-F" "#{session_name}"))
+                  "list-sessions" "-F" ghostel-tmux--session-rows-format))
          (sessions (and (eql (car result) 0)
-                        (split-string (cdr result) "\n" t)))
-         (default (car sessions)))
+                        (mapcar #'car (ghostel-tmux--parse-session-rows
+                                       (cdr result))))))
     (cond
      ((null sessions)
       (user-error "Ghostel-tmux: No tmux sessions found%s"
                   (ghostel-tmux--server-label)))
-     ((= (length sessions) 1) (car sessions))
-     (t (completing-read "tmux session: " sessions nil t nil nil default)))))
+     (ask (ghostel-tmux--completing-read-session "tmux session" sessions))
+     (t (car sessions)))))
 
 (defun ghostel-tmux--check-spawn ()
   "Signal `user-error' when no controller can start in `default-directory'."
@@ -3938,7 +3995,10 @@ tmux leaves a run of `#' before `[' as it is, as a style."
   "Attach to the tmux SESSION via control mode and materialize its panes.
 SESSION is an exact name.  tmux cannot address a name that starts with
 `$' or contains `:' this way.  A non-nil SOCKET is used instead of
-`ghostel-tmux-socket'; interactively, a prefix argument prompts for it.
+`ghostel-tmux-socket'.  Interactively, SESSION is the one tmux would
+attach: the most recently used session without a client, else the most
+recently used one.  A prefix argument prompts for the session, and two
+prompt for the socket first.
 Returns the controller buffer before any pane is there: tmux's active
 pane takes the selected window once tmux reports it, unless the window
 shows another buffer by then.  With NO-DISPLAY non-nil, no window is
@@ -3948,9 +4008,9 @@ attached again: its controller is returned, and the selected window
 shows the session unless NO-DISPLAY.
 `ghostel-tmux-attach-hook' runs once the session's panes are there."
   (interactive
-   (let* ((socket (ghostel-tmux--read-socket))
+   (let* ((socket (ghostel-tmux--read-socket t))
           (ghostel-tmux--server (ghostel-tmux--resolve-server socket)))
-     (list (ghostel-tmux--read-session) socket)))
+     (list (ghostel-tmux--read-session current-prefix-arg) socket)))
   (ghostel-tmux--check-spawn)
   (let ((ghostel-tmux--server (ghostel-tmux--resolve-server socket)))
     (or (ghostel-tmux--reuse-controller session no-display)
@@ -4119,6 +4179,69 @@ a window at any time."
                            (lambda (_string) (mapcar #'buffer-name (panes))))
                           nil t))))
         (ghostel-tmux--select-pane-buffer pane)))))
+
+(defun ghostel-tmux-switch-session ()
+  "Switch to another tmux session of the server via `completing-read'.
+The sessions are offered in the order in which tmux would attach them.
+The Emacs window goes on to show the session chosen.  A session
+attached in this Emacs already is shown, not switched to."
+  (interactive)
+  (let ((controller (ghostel-tmux--active-controller)))
+    (unless (buffer-live-p controller)
+      (user-error "Ghostel-tmux: No active controller"))
+    (with-current-buffer controller
+      (unless (ghostel-tmux--controller-live-p)
+        (user-error "Ghostel-tmux: Controller is not connected"))
+      (ghostel-tmux--queue-command
+       (format "list-sessions -F \"%s\"" ghostel-tmux--session-rows-format)
+       (lambda (output)
+         (when output
+           ;; A prompt cannot open while tmux's lines are handled.
+           (run-at-time 0 nil #'ghostel-tmux--pick-session
+                        controller output)))))))
+
+(defun ghostel-tmux--pick-session (controller output)
+  "Prompt for a session of `list-sessions' OUTPUT and move CONTROLLER to it.
+CONTROLLER can end while the prompt is open."
+  (when (and (buffer-live-p controller) (not (active-minibuffer-window)))
+    (let* ((sessions (cl-remove (buffer-local-value 'ghostel-tmux--session-id
+                                                    controller)
+                                (ghostel-tmux--parse-session-rows
+                                 (ghostel-tmux--decode-text output))
+                                :key #'cdr))
+           (name (if sessions
+                     (with-local-quit
+                       (ghostel-tmux--completing-read-session
+                        "Switch to tmux session" (mapcar #'car sessions)))
+                   (message "Ghostel-tmux: No other tmux session")
+                   nil))
+           (id (cdr (assoc name sessions))))
+      (when (and id (buffer-live-p controller))
+        (with-current-buffer controller
+          (let ((other (ghostel-tmux--session-controller id)))
+            (cond
+             (other
+              (with-current-buffer other
+                (when-let* ((pane (ghostel-tmux--attach-pane)))
+                  (ghostel-tmux--display-pane-in-window
+                   pane (selected-window)))))
+             ((ghostel-tmux--controller-live-p)
+              (ghostel-tmux--cmd (format "switch-client -t $%d" id))))))))))
+
+(defun ghostel-tmux--session-controller (id)
+  "Return another live controller attached to session ID of this server."
+  (let ((self (current-buffer))
+        (server-key ghostel-tmux--server-key))
+    (and server-key
+         (cl-find-if
+          (lambda (buf)
+            (and (not (eq buf self))
+                 (with-current-buffer buf
+                   (and (ghostel-tmux--controller-live-p)
+                        (not ghostel-tmux--closing)
+                        (eql ghostel-tmux--session-id id)
+                        (equal ghostel-tmux--server-key server-key)))))
+          (buffer-list)))))
 
 (defun ghostel-tmux-restore-split ()
   "Split the selected window's tmux window again as tmux lays it out.

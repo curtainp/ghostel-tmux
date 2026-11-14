@@ -1425,6 +1425,112 @@ fills its output queue between the two repeats the CR."
                            "select-pane -t %2" "select-pane -t %3"))))
       (mapc #'kill-buffer panes))))
 
+(defmacro ghostel-tmux-test--with-session-picker (ctl picked &rest body)
+  "Run `ghostel-tmux-switch-session' in CTL, session $0, and then BODY.
+tmux answers with `ghostel-tmux-test--session-rows' and the user picks
+PICKED.  `sent' is the wire and `offered' what the prompt offered."
+  (declare (indent 2))
+  `(let (sent offered timers)
+     (ghostel-tmux-test--with-wire ,ctl sent
+       (setq ghostel-tmux--session-id 0
+             ghostel-tmux--server-key "host 1 2")
+       (cl-letf (((symbol-function 'run-at-time)
+                  (lambda (_time _repeat &rest call) (push call timers)))
+                 ((symbol-function 'completing-read)
+                  (lambda (_prompt table &rest _)
+                    (setq offered (all-completions "" table))
+                    ,picked)))
+         (ghostel-tmux-switch-session)
+         (should (equal (pop sent)
+                        (format "list-sessions -F \"%s\"\n"
+                                ghostel-tmux--session-rows-format)))
+         (ghostel-tmux-test--feed
+          ,ctl (format "%%begin 1 1 1\r\n%s%%end 1 1 1\r\n"
+                       (string-replace "\n" "\r\n"
+                                       ghostel-tmux-test--session-rows)))
+         (let ((call (assq #'ghostel-tmux--pick-session timers)))
+           (should call)
+           (with-temp-buffer (apply call)))
+         ,@body))))
+
+(ert-deftest ghostel-tmux-test-switch-session-sends-switch-client ()
+  "The picker offers the other sessions and switches by session id."
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-session-picker ctl "busy"
+      (should (equal offered '("my proj" "old" "busy")))
+      (should (equal sent '("switch-client -t $3\n"))))))
+
+(ert-deftest ghostel-tmux-test-switch-session-shows-an-attached-session ()
+  "A session another controller of the server holds gets no second client."
+  (ghostel-tmux-test--with-controller other
+    (setq ghostel-tmux--controller-process 'fake-proc
+          ghostel-tmux--session-id 3
+          ghostel-tmux--server-key "host 1 2")
+    (let ((pane (generate-new-buffer "*test-ss-pane*"))
+          shown)
+      (unwind-protect
+          (ghostel-tmux-test--with-controller ctl
+            (cl-letf (((symbol-function 'ghostel-tmux--attach-pane)
+                       (lambda () (and (eq (current-buffer) other) pane)))
+                      ((symbol-function 'ghostel-tmux--display-pane-in-window)
+                       (lambda (buf window) (push (list buf window) shown))))
+              (ghostel-tmux-test--with-session-picker ctl "busy"
+                (should (null sent))
+                (should (equal shown (list (list pane (selected-window))))))))
+        (kill-buffer pane)))))
+
+(ert-deftest ghostel-tmux-test-switch-session-other-server ()
+  "A controller of another server with the same session id is no match."
+  (ghostel-tmux-test--with-controller other
+    (setq ghostel-tmux--controller-process 'fake-proc
+          ghostel-tmux--session-id 3
+          ghostel-tmux--server-key "host 9 9")
+    (ghostel-tmux-test--with-controller ctl
+      (ghostel-tmux-test--with-session-picker ctl "busy"
+        (should (equal sent '("switch-client -t $3\n")))))))
+
+(ert-deftest ghostel-tmux-test-switch-session-without-other-sessions ()
+  "With the current session only, nothing is asked or sent."
+  (ghostel-tmux-test--with-controller ctl
+    (let (sent messages)
+      (ghostel-tmux-test--with-wire ctl sent
+        (setq ghostel-tmux--session-id 0)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (&rest _) (error "Prompted"))))
+          (ghostel-tmux-test--capturing-messages messages
+            (ghostel-tmux--pick-session ctl "$0 1 300 main\n")))
+        (should (equal messages '("Ghostel-tmux: No other tmux session")))
+        (should (null sent))))))
+
+(ert-deftest ghostel-tmux-test-switch-session-controller-ends-at-the-prompt ()
+  "A controller that ended while the prompt was open sends nothing,
+and neither does the controller that is current then."
+  (ghostel-tmux-test--with-controller bystander
+    (let ((ctl (generate-new-buffer " *ghostel-tmux-test-gone*"))
+          sent)
+      (with-current-buffer ctl
+        (ghostel-tmux-control-mode))
+      (ghostel-tmux-test--with-wire bystander sent
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (&rest _) (kill-buffer ctl) "busy")))
+          (ghostel-tmux--pick-session ctl ghostel-tmux-test--session-rows))
+        (should (null sent))))))
+
+(ert-deftest ghostel-tmux-test-session-prefix-keys ()
+  "`s' picks a session, `w' a pane, and `(', `)' and `L' cycle sessions."
+  (should (eq (lookup-key ghostel-tmux-prefix-map "s")
+              #'ghostel-tmux-switch-session))
+  (should (eq (lookup-key ghostel-tmux-prefix-map "w")
+              #'ghostel-tmux-switch-pane))
+  (let (cmds)
+    (cl-letf (((symbol-function 'ghostel-tmux--cmd)
+               (lambda (c) (push c cmds))))
+      (dolist (key '("(" ")" "L"))
+        (funcall (lookup-key ghostel-tmux-prefix-map key))))
+    (should (equal (nreverse cmds)
+                   '("switch-client -p" "switch-client -n"
+                     "switch-client -l")))))
+
 (ert-deftest ghostel-tmux-test-switch-pane-sends-select-pane ()
   ;; The picker sends `select-pane' and shows the pane at once.
   (let ((cmds nil)
@@ -2367,21 +2473,82 @@ A later answer clears the pid an earlier one set."
       (should (equal (ghostel-tmux--resolve-server "") '("/opt/bin/tmux")))
       (should-not (local-variable-p 'ghostel-tmux-socket)))))
 
-(ert-deftest ghostel-tmux-test-prefix-argument-prompts-for-the-socket ()
-  "With a prefix argument, the sessions are listed on the socket read first."
+(ert-deftest ghostel-tmux-test-attach-prefix-arguments ()
+  "One prefix argument asks for the session, two for the socket first."
   (let (listed spawned)
     (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "work"))
               ((symbol-function 'ghostel-tmux--read-session)
-               (lambda () (push ghostel-tmux--server listed) "s"))
+               (lambda (&optional ask)
+                 (push (cons (and ask t) ghostel-tmux--server) listed)
+                 "s"))
               ((symbol-function 'ghostel-tmux--check-spawn) #'ignore)
               ((symbol-function 'ghostel-tmux--spawn-controller)
                (lambda (&rest _) (push ghostel-tmux--server spawned))))
+      (dolist (arg '(nil (4) (16)))
+        (let ((current-prefix-arg arg))
+          (call-interactively #'ghostel-tmux-attach))))
+    (should (equal (nreverse listed)
+                   '((nil "tmux") (t "tmux") (t "tmux" "-L" "work"))))
+    (should (equal (nreverse spawned)
+                   '(("tmux") ("tmux") ("tmux" "-L" "work"))))))
+
+(ert-deftest ghostel-tmux-test-prefix-argument-prompts-for-the-socket ()
+  "One prefix argument asks `ghostel-tmux-new' for the socket."
+  (let (spawned)
+    (cl-letf (((symbol-function 'read-string)
+               (lambda (prompt &rest _)
+                 (if (string-search "socket" prompt) "work" "s")))
+              ((symbol-function 'ghostel-tmux--check-spawn) #'ignore)
+              ((symbol-function 'ghostel-tmux--session-exists-p) #'always)
+              ((symbol-function 'ghostel-tmux--spawn-controller)
+               (lambda (&rest _) (push ghostel-tmux--server spawned))))
       (let ((current-prefix-arg '(4)))
-        (call-interactively #'ghostel-tmux-attach))
-      (let ((current-prefix-arg nil))
-        (call-interactively #'ghostel-tmux-attach)))
-    (should (equal listed '(("tmux") ("tmux" "-L" "work"))))
-    (should (equal spawned '(("tmux") ("tmux" "-L" "work"))))))
+        (call-interactively #'ghostel-tmux-new)))
+    (should (equal spawned '(("tmux" "-L" "work"))))))
+
+(defconst ghostel-tmux-test--session-rows
+  "$0 1 300 main\n$1 0 100 old\n$2 0 200 my proj\n$3 2 400 busy\n"
+  "A `list-sessions' answer in `ghostel-tmux--session-rows-format'.")
+
+(ert-deftest ghostel-tmux-test-session-rows-are-in-tmux-attach-order ()
+  "Sessions without a client come first, the most recently used of each first."
+  (should (equal (ghostel-tmux--parse-session-rows
+                  (concat "no row\n" ghostel-tmux-test--session-rows))
+                 '(("my proj" . 2) ("old" . 1) ("busy" . 3) ("main" . 0))))
+  ;; Of two sessions of one second, tmux takes the newer one.
+  (should (equal (ghostel-tmux--parse-session-rows "$0 0 100 aa\n$1 0 100 zz\n")
+                 '(("zz" . 1) ("aa" . 0)))))
+
+(ert-deftest ghostel-tmux-test-read-session-picks-what-tmux-would-attach ()
+  "Without ASK no prompt opens, also with several sessions."
+  (cl-letf (((symbol-function 'ghostel-tmux--process-file)
+             (lambda (&rest _) (cons 0 ghostel-tmux-test--session-rows)))
+            ((symbol-function 'completing-read)
+             (lambda (&rest _) (error "Prompted"))))
+    (should (equal (ghostel-tmux--read-session) "my proj"))))
+
+(ert-deftest ghostel-tmux-test-read-session-asks-also-for-one-session ()
+  "With ASK the prompt opens for a single session too, with it as the default."
+  (let (asked)
+    (cl-letf (((symbol-function 'ghostel-tmux--process-file)
+               (lambda (&rest _) (cons 0 "$4 0 100 only\n")))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt table &rest args)
+                 (push (list (all-completions "" table) (nth 4 args)) asked)
+                 "only")))
+      (should (equal (ghostel-tmux--read-session t) "only")))
+    (should (equal asked '((("only") "only"))))))
+
+(ert-deftest ghostel-tmux-test-session-prompt-keeps-the-order ()
+  "The completion table tells the UI not to sort the sessions."
+  (let (metadata)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _)
+                 (setq metadata (completion-metadata "" table nil))
+                 "b")))
+      (ghostel-tmux--completing-read-session "Session" '("b" "a")))
+    (should (eq (completion-metadata-get metadata 'display-sort-function)
+                #'identity))))
 
 (ert-deftest ghostel-tmux-test-controller-keeps-its-server ()
   "The controller runs on the socket and keeps it for later calls."
