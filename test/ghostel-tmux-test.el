@@ -55,9 +55,10 @@
                 ((symbol-function 'ghostel-tmux--controller-live-p)
                  (lambda () t))
                 ((symbol-function 'ghostel-tmux--controller-send) #'ignore))
+        (ghostel-tmux-test--feed ctl "\eP1000p")
         (ghostel-tmux--queue-command "x" (lambda (out) (setq reply out)))
         (ghostel-tmux-test--feed
-         ctl (concat "\eP1000p%output %0 a\r\n"
+         ctl (concat "%output %0 a\r\n"
                      "%layout-change @0 ffff,bogus\r\n"
                      "%output %0 b\r\n"))
         (should (equal ghostel-tmux--line-buffer ""))
@@ -79,9 +80,10 @@ fills its output queue between the two repeats the CR."
                 ((symbol-function 'ghostel-tmux--controller-live-p)
                  (lambda () t))
                 ((symbol-function 'ghostel-tmux--controller-send) #'ignore))
+        (ghostel-tmux-test--feed ctl "\eP1000p")
         (ghostel-tmux--queue-command "x" (lambda (out) (setq reply out)))
         (ghostel-tmux-test--feed
-         ctl (concat "\eP1000p%output %0 a\r\r\n"
+         ctl (concat "%output %0 a\r\r\n"
                      "%begin 1 2 1\r\r\nok\r\r\n%end 1 2 1\r\r\n"))
         (should (equal seen '("a")))
         (should (equal reply "ok"))
@@ -396,7 +398,8 @@ fills its output queue between the two repeats the CR."
       (cl-letf (((symbol-function 'process-send-string)
                  (lambda (_p s) (push s sent)))
                 ((symbol-function 'process-live-p) (lambda (_) t)))
-        (setq ghostel-tmux--controller-process 'fake)
+        (setq ghostel-tmux--controller-process 'fake
+              ghostel-tmux--parser-state 'idle)
         (ghostel-tmux--queue-command "first" #'ignore)
         (ghostel-tmux--queue-command "second" #'ignore)
         ;; Only the first command should have been sent.
@@ -899,7 +902,8 @@ fills its output queue between the two repeats the CR."
 (ert-deftest ghostel-tmux-test-cmd-sends-to-controller ()
   (let ((sent nil))
     (ghostel-tmux-test--with-controller ctl
-      (setq ghostel-tmux--controller-process 'fake-proc)
+      (setq ghostel-tmux--controller-process 'fake-proc
+            ghostel-tmux--parser-state 'idle)
       (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
                 ((symbol-function 'process-send-string)
                  (lambda (_p s) (push s sent))))
@@ -1630,7 +1634,8 @@ fills its output queue between the two repeats the CR."
     (let ((deleted nil)
           (sent nil))
       (with-current-buffer ctl
-        (setq ghostel-tmux--controller-process 'fake-proc))
+        (setq ghostel-tmux--controller-process 'fake-proc
+              ghostel-tmux--parser-state 'idle))
       (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
                 ((symbol-function 'process-send-string)
                  (lambda (_p s) (push s sent)))
@@ -1652,6 +1657,7 @@ fills its output queue between the two repeats the CR."
           (with-current-buffer host
             (ghostel-mode)
             (setq ghostel-tmux--dcs-active t
+                  ghostel-tmux--parser-state 'idle
                   ghostel-tmux--panes (make-hash-table)
                   ghostel--term 'fake-term))
           (cl-letf (((symbol-function 'ghostel-send-string)
@@ -2397,6 +2403,7 @@ A later answer clears the pid an earlier one set."
   "A pane of a live session is captured over the control channel."
   (ghostel-tmux-test--with-controller ctl
     (setq-local ghostel-tmux--dcs-active t)
+    (setq ghostel-tmux--parser-state 'idle)
     (let ((pane (generate-new-buffer " *ghostel-tmux-test-pane*"))
           sent shown)
       (unwind-protect
@@ -4525,7 +4532,8 @@ display-message -p %s\n"
     (let ((sent nil)
           (big (make-string 1500 ?a)))
       (with-current-buffer ctl
-        (setq ghostel-tmux--controller-process 'fake-proc))
+        (setq ghostel-tmux--controller-process 'fake-proc
+              ghostel-tmux--parser-state 'idle))
       (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
                 ((symbol-function 'process-send-string)
                  (lambda (_p s) (push s sent))))
@@ -4536,7 +4544,6 @@ display-message -p %s\n"
           (should (= (length sent) 1))
           (should (= (length ghostel-tmux--command-queue) 2))
           ;; Completing each reply block releases the next chunk.
-          (setq ghostel-tmux--parser-state 'idle)
           (ghostel-tmux-test--feed
            ctl "%begin 1 1 1\r\n%end 1 1 1\r\n")
           (ghostel-tmux--pump-command-queue)
@@ -4735,7 +4742,8 @@ display-message -p %s\n"
     (unwind-protect
         (with-temp-buffer
           (with-current-buffer ctl
-            (setq-local ghostel-tmux--controller-process 'fake-proc))
+            (setq-local ghostel-tmux--controller-process 'fake-proc
+                        ghostel-tmux--parser-state 'idle))
           (setq-local ghostel-tmux--controller-buffer ctl)
           (cl-letf (((symbol-function 'ghostel-terminal-size)
                      (lambda () '(120 . 40)))
@@ -7035,6 +7043,54 @@ PANES is a list of two variables, bound to the buffers of %5 in window
           (should (equal seen (list (list host (list pane))))))
       (when (buffer-live-p pane) (kill-buffer pane))
       (when (buffer-live-p host) (kill-buffer host)))))
+
+(ert-deftest ghostel-tmux-test-detach-before-tmux-started-writes-nothing ()
+  "A session whose tmux has not answered yet is ended without a command."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((deleted nil)
+          (sent nil))
+      (setq ghostel-tmux--controller-process 'fake-proc)
+      (cl-letf (((symbol-function 'process-live-p) #'always)
+                ((symbol-function 'process-send-string)
+                 (lambda (_p s) (push s sent)))
+                ((symbol-function 'accept-process-output) #'ignore)
+                ((symbol-function 'delete-process)
+                 (lambda (p) (setq deleted p))))
+        (ghostel-tmux-detach))
+      (should-not sent)
+      (should (eq deleted 'fake-proc)))))
+
+(ert-deftest ghostel-tmux-test-commands-wait-for-tmux-to-start ()
+  "A command given before tmux's first line is written after it, in order."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil)
+          (replies nil))
+      (cl-letf (((symbol-function 'process-send-string)
+                 (lambda (_p s) (push s sent)))
+                ((symbol-function 'process-live-p) #'always))
+        (setq ghostel-tmux--controller-process 'fake)
+        (ghostel-tmux-command "select-window -t @1"
+                              (lambda (output _failure) (push output replies)))
+        (should-not sent)
+        (should-not ghostel-tmux--command-in-flight)
+        ;; What the shell prints before tmux runs is not tmux's.
+        (ghostel-tmux-test--feed ctl "stty: stdin isn't a terminal\n")
+        (ghostel-tmux--pump-deferred ctl)
+        (should-not sent)
+        ;; tmux's startup block and the session come in one read.
+        (ghostel-tmux-test--feed
+         ctl "%begin 1 1 0\n%end 1 1 0\n%session-changed $1 s\n")
+        (should-not sent)
+        (ghostel-tmux--pump-deferred ctl)
+        (should (equal sent
+                       (list (concat "select-window -t @1\ndisplay-message -p "
+                                     ghostel-tmux--typed-reply-end "\n"))))
+        (ghostel-tmux-test--feed ctl "%begin 1 2 1\n%end 1 2 1\n")
+        (ghostel-tmux-test--feed ctl ghostel-tmux-test--reply-end)
+        (should (equal replies '("")))
+        ;; The session's windows are asked for next.
+        (ghostel-tmux--pump-deferred ctl)
+        (should (string-search "list-windows" (car sent)))))))
 
 (ert-deftest ghostel-tmux-test-feed-entered-again-handles-each-line-once ()
   "Output that arrives while a hook function waits is handled once, in order."

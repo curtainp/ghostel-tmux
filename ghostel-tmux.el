@@ -455,8 +455,9 @@ re-enter process filters and deliver protocol bytes out of order.")
 (defun ghostel-tmux--feed-bytes (string)
   "Feed STRING (process output) to the parser in the current buffer.
 Splits on newlines, dispatches per-line via the state machine.
-Output that arrives while a line is handled, as when its handler waits,
-is left to the feed under way."
+tmux's first line lets the commands queued so far go.  Output that
+arrives while a line is handled, as when its handler waits, is left to
+the feed under way."
   (setq ghostel-tmux--line-buffer
         (concat ghostel-tmux--line-buffer string))
   (unless (memq (current-buffer) ghostel-tmux--in-feed)
@@ -478,6 +479,7 @@ is left to the feed under way."
             (idx 0)
             (ghostel-tmux--in-feed (cons (current-buffer)
                                          ghostel-tmux--in-feed)))
+        (ghostel-tmux--pump-command-queue)
         ;; `ghostel-tmux--handle-line' may reset
         ;; `ghostel-tmux--line-buffer' under our feet — re-check the
         ;; buffer length before every match so a stale IDX can't index
@@ -782,9 +784,12 @@ Commands are dropped once tmux is leaving control mode."
   "Send the next queued command if no command is in flight.
 Inside a feed (see `ghostel-tmux--in-feed') the send is deferred to a
 timer instead: writing to the controller can block, and a blocking
-process write re-enters process filters mid-parse."
+process write re-enters process filters mid-parse.  Nothing is sent
+before tmux's first line: the shell that starts a remote tmux can
+swallow what is written before tmux runs."
   (when (and (not ghostel-tmux--command-in-flight)
-             ghostel-tmux--command-queue)
+             ghostel-tmux--command-queue
+             (not (eq ghostel-tmux--parser-state 'preamble)))
     (if ghostel-tmux--in-feed
         (unless ghostel-tmux--pump-scheduled
           (setq ghostel-tmux--pump-scheduled t)
@@ -4357,7 +4362,8 @@ text the commands printed, and tmux's error message if one failed, else
 nil.  Without CALLBACK, a failure is reported in the echo area.
 CALLBACK runs from a process filter.  When tmux leaves before it
 answers, CALLBACK is not called, and `ghostel-tmux-detach-hook' runs.
-A command must not print just `ghostel-tmux-reply-end', which ends the
+A command given before tmux has started is sent once it runs.  A
+command must not print just `ghostel-tmux-reply-end', which ends the
 answer.
 Detach with `ghostel-tmux-detach', not with a command.  BUFFER is as
 for `ghostel-tmux-controller'."
