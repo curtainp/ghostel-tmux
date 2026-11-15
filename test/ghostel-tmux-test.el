@@ -1516,6 +1516,36 @@ and neither does the controller that is current then."
           (ghostel-tmux--pick-session ctl ghostel-tmux-test--session-rows))
         (should (null sent))))))
 
+(ert-deftest ghostel-tmux-test-switch-session-offers-a-skipped-session-last ()
+  (let ((ghostel-tmux-skip-sessions-regexp "\\`my "))
+    (ghostel-tmux-test--with-controller ctl
+      (ghostel-tmux-test--with-session-picker ctl "my proj"
+        (should (equal offered '("old" "busy" "my proj")))
+        (should (equal sent '("switch-client -t $2\n")))))))
+
+(ert-deftest ghostel-tmux-test-switch-session-skips-as-the-controllers-host ()
+  "The sessions skipped are those of the controller's connection."
+  (let ((connection-local-profile-alist nil)
+        (connection-local-criteria-alist nil)
+        offered)
+    (connection-local-set-profile-variables
+     'ghostel-tmux-test-profile
+     '((ghostel-tmux-skip-sessions-regexp . "\\`my ")))
+    (connection-local-set-profiles
+     '(:application tramp :machine "ghostel-tmux-test-host")
+     'ghostel-tmux-test-profile)
+    (ghostel-tmux-test--with-controller ctl
+      (setq default-directory "/ssh:ghostel-tmux-test-host:/"
+            ghostel-tmux--session-id 0)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt table &rest _)
+                   (setq offered (all-completions "" table))
+                   nil)))
+        (with-temp-buffer
+          (setq default-directory temporary-file-directory)
+          (ghostel-tmux--pick-session ctl ghostel-tmux-test--session-rows))))
+    (should (equal offered '("old" "busy" "my proj")))))
+
 (ert-deftest ghostel-tmux-test-session-prefix-keys ()
   "`s' picks a session, `w' a pane, and `(', `)' and `L' cycle sessions."
   (should (eq (lookup-key ghostel-tmux-prefix-map "s")
@@ -2538,6 +2568,94 @@ A later answer clears the pid an earlier one set."
                  "only")))
       (should (equal (ghostel-tmux--read-session t) "only")))
     (should (equal asked '((("only") "only"))))))
+
+(ert-deftest ghostel-tmux-test-skipped-sessions-come-last ()
+  "Skipped sessions follow the others, in tmux's order among themselves."
+  (let ((ghostel-tmux-skip-sessions-regexp "\\`\\(my\\|old\\)"))
+    (should (equal (ghostel-tmux--parse-session-rows
+                    ghostel-tmux-test--session-rows)
+                   '(("busy" . 3) ("main" . 0) ("my proj" . 2) ("old" . 1))))))
+
+(ert-deftest ghostel-tmux-test-skipped-sessions-match-case ()
+  (let ((ghostel-tmux-skip-sessions-regexp "\\`MY ")
+        (case-fold-search t))
+    (should-not (ghostel-tmux--skipped-session-p "my proj"))
+    (should (ghostel-tmux--skipped-session-p "MY proj"))
+    (should (equal (car (ghostel-tmux--parse-session-rows
+                         ghostel-tmux-test--session-rows))
+                   '("my proj" . 2)))))
+
+(ert-deftest ghostel-tmux-test-skip-sessions-regexp-is-connection-local ()
+  (let ((connection-local-profile-alist nil)
+        (connection-local-criteria-alist nil)
+        (default-directory "/ssh:ghostel-tmux-test-host:/"))
+    (connection-local-set-profile-variables
+     'ghostel-tmux-test-profile
+     '((ghostel-tmux-skip-sessions-regexp . "\\`my ")))
+    (connection-local-set-profiles
+     '(:application tramp :machine "ghostel-tmux-test-host")
+     'ghostel-tmux-test-profile)
+    (with-temp-buffer
+      (should (ghostel-tmux--skipped-session-p "my proj"))
+      (should (equal (car (ghostel-tmux--parse-session-rows
+                           ghostel-tmux-test--session-rows))
+                     '("old" . 1)))
+      (should-not (local-variable-p 'ghostel-tmux-skip-sessions-regexp)))))
+
+(ert-deftest ghostel-tmux-test-read-session-passes-over-a-skipped-session ()
+  "The session tmux would attach is not picked when it is a skipped one."
+  (let ((ghostel-tmux-skip-sessions-regexp "\\`my "))
+    (cl-letf (((symbol-function 'ghostel-tmux--process-file)
+               (lambda (&rest _) (cons 0 ghostel-tmux-test--session-rows)))
+              ((symbol-function 'completing-read)
+               (lambda (&rest _) (error "Prompted"))))
+      (should (equal (ghostel-tmux--read-session) "old")))))
+
+(ert-deftest ghostel-tmux-test-attach-by-name-takes-a-skipped-session ()
+  (let ((ghostel-tmux-skip-sessions-regexp "")
+        attached)
+    (cl-letf (((symbol-function 'ghostel-tmux--check-spawn) #'ignore)
+              ((symbol-function 'ghostel-tmux--spawn-controller)
+               (lambda (session &rest _) (push session attached))))
+      (ghostel-tmux-attach "agents"))
+    (should (equal attached '("agents")))))
+
+(ert-deftest ghostel-tmux-test-read-session-refuses-skipped-sessions-only ()
+  "With skipped sessions only, no session is picked, and the server is named."
+  (let ((ghostel-tmux-skip-sessions-regexp "")
+        (ghostel-tmux-socket "work"))
+    (cl-letf (((symbol-function 'ghostel-tmux--process-file)
+               (lambda (&rest _) (cons 0 ghostel-tmux-test--session-rows))))
+      (should (equal (cadr (should-error (ghostel-tmux--read-session)
+                                         :type 'user-error))
+                     "Ghostel-tmux: All tmux sessions are skipped; \
+a prefix argument asks for one"))
+      (should (equal (cadr (should-error
+                            (let ((ghostel-tmux--server
+                                   (ghostel-tmux--resolve-server)))
+                              (ghostel-tmux--read-session))
+                            :type 'user-error))
+                     "Ghostel-tmux: All tmux sessions on -L work are skipped; \
+a prefix argument asks for one")))))
+
+(ert-deftest ghostel-tmux-test-read-session-offers-a-skipped-session-last ()
+  "With ASK a skipped session can be picked, and is not the default."
+  (let ((ghostel-tmux-skip-sessions-regexp "\\`my ")
+        asked)
+    (cl-letf (((symbol-function 'ghostel-tmux--process-file)
+               (lambda (&rest _) (cons 0 ghostel-tmux-test--session-rows)))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt table &rest args)
+                 (push (list (all-completions "" table) (nth 4 args)) asked)
+                 "my proj")))
+      (should (equal (ghostel-tmux--read-session t) "my proj")))
+    (should (equal asked '((("old" "busy" "main" "my proj") "old"))))
+    ;; Skipped sessions only are all there is to offer.
+    (let ((ghostel-tmux-skip-sessions-regexp ""))
+      (cl-letf (((symbol-function 'ghostel-tmux--process-file)
+                 (lambda (&rest _) (cons 0 "$4 0 100 only\n")))
+                ((symbol-function 'completing-read) (lambda (&rest _) "only")))
+        (should (equal (ghostel-tmux--read-session t) "only"))))))
 
 (ert-deftest ghostel-tmux-test-session-prompt-keeps-the-order ()
   "The completion table tells the UI not to sort the sessions."

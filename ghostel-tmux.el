@@ -67,6 +67,14 @@ host can be set with connection-local variables."
                  (string :tag "Socket name or path"))
   :group 'ghostel-tmux)
 
+(defcustom ghostel-tmux-skip-sessions-regexp nil
+  "Regexp of the tmux session names that are not attached unasked, or nil.
+`ghostel-tmux-attach' picks no matching session by itself, and the
+session prompts offer one after all others.  Case matters.  The value
+for a host can be set with connection-local variables."
+  :type '(choice (const :tag "None" nil) regexp)
+  :group 'ghostel-tmux)
+
 (defcustom ghostel-tmux-prefix-key "C-t"
   "Key sequence used as the tmux prefix in pane buffers.
 A `kbd'-style string (e.g. \"\\`C-t'\", \"\\`C-b'\").  Changing this
@@ -3605,25 +3613,41 @@ tmux's text is UTF-8 whatever the locale."
   "#{session_id} #{session_attached} #{session_activity} #{session_name}"
   "The `list-sessions' format `ghostel-tmux--parse-session-rows' parses.")
 
+(defun ghostel-tmux--skip-sessions-regexp ()
+  "Return `ghostel-tmux-skip-sessions-regexp' for `default-directory'."
+  (with-connection-local-variables ghostel-tmux-skip-sessions-regexp))
+
+(defun ghostel-tmux--skipped-session-p (name &optional regexp)
+  "Return non-nil when the session NAME is not to be attached unasked.
+REGEXP stands in for `ghostel-tmux--skip-sessions-regexp'."
+  (let ((regexp (or regexp (ghostel-tmux--skip-sessions-regexp)))
+        (case-fold-search nil))
+    (and regexp (string-match-p regexp name) t)))
+
 (defun ghostel-tmux--parse-session-rows (output)
   "Return the sessions of `list-sessions' OUTPUT as a list of (NAME . ID).
 They are in the order in which tmux would attach them: the sessions without
 a client before the others, and of each the most recently used first.
 tmux tells that time in seconds; of the sessions of one second, the
-newest comes first."
-  (let (rows)
+newest comes first.  The sessions of `ghostel-tmux--skipped-session-p'
+come after all others."
+  (let ((skip (ghostel-tmux--skip-sessions-regexp))
+        rows)
     (dolist (line (split-string output "\n" t))
       (when (string-match
              "\\`\\$\\([0-9]+\\) \\([0-9]+\\) \\([0-9]+\\) \\(.+\\)\\'" line)
-        (push (list (match-string 4 line)
-                    (string-to-number (match-string 1 line))
-                    (equal (match-string 2 line) "0")
-                    (string-to-number (match-string 3 line)))
-              rows)))
+        (let ((name (match-string 4 line))
+              (id (string-to-number (match-string 1 line)))
+              (detached (equal (match-string 2 line) "0"))
+              (activity (string-to-number (match-string 3 line))))
+          (push (list name id detached activity
+                      (and skip (ghostel-tmux--skipped-session-p name skip)))
+                rows))))
     (mapcar (lambda (row) (cons (nth 0 row) (nth 1 row)))
             (sort (nreverse rows)
                   (lambda (a b)
                     (cond
+                     ((not (eq (nth 4 a) (nth 4 b))) (nth 4 b))
                      ((not (eq (nth 2 a) (nth 2 b))) (nth 2 a))
                      ((/= (nth 3 a) (nth 3 b)) (> (nth 3 a) (nth 3 b)))
                      (t (> (nth 1 a) (nth 1 b)))))))))
@@ -3642,8 +3666,9 @@ They are offered in their order, with the first as the default."
 
 (defun ghostel-tmux--read-session (&optional ask)
   "Return the name of the session tmux would attach.
-That is the first of `ghostel-tmux--parse-session-rows'.  With ASK
-non-nil, prompt for a session, with that one as the default.
+That is the first of `ghostel-tmux--parse-session-rows'; one of
+`ghostel-tmux--skipped-session-p' there signals a `user-error'.  With
+ASK non-nil, prompt for a session, with the first as the default.
 A non-zero exit (no server running) counts as no sessions."
   (let* ((result (ghostel-tmux--process-file
                   "list-sessions" "-F" ghostel-tmux--session-rows-format))
@@ -3655,6 +3680,10 @@ A non-zero exit (no server running) counts as no sessions."
       (user-error "Ghostel-tmux: No tmux sessions found%s"
                   (ghostel-tmux--server-label)))
      (ask (ghostel-tmux--completing-read-session "tmux session" sessions))
+     ((ghostel-tmux--skipped-session-p (car sessions))
+      (user-error "Ghostel-tmux: All tmux sessions%s are skipped; \
+a prefix argument asks for one"
+                  (ghostel-tmux--server-label)))
      (t (car sessions)))))
 
 (defun ghostel-tmux--check-spawn ()
@@ -3997,8 +4026,10 @@ SESSION is an exact name.  tmux cannot address a name that starts with
 `$' or contains `:' this way.  A non-nil SOCKET is used instead of
 `ghostel-tmux-socket'.  Interactively, SESSION is the one tmux would
 attach: the most recently used session without a client, else the most
-recently used one.  A prefix argument prompts for the session, and two
-prompt for the socket first.
+recently used one.  A session that `ghostel-tmux-skip-sessions-regexp'
+matches is passed over, and with such sessions only, none is attached.
+A prefix argument prompts for the session, and two prompt for the
+socket first.
 Returns the controller buffer before any pane is there: tmux's active
 pane takes the selected window once tmux reports it, unless the window
 shows another buffer by then.  With NO-DISPLAY non-nil, no window is
@@ -4182,9 +4213,10 @@ a window at any time."
 
 (defun ghostel-tmux-switch-session ()
   "Switch to another tmux session of the server via `completing-read'.
-The sessions are offered in the order in which tmux would attach them.
-The Emacs window goes on to show the session chosen.  A session
-attached in this Emacs already is shown, not switched to."
+The sessions are offered in the order in which tmux would attach them,
+those of `ghostel-tmux-skip-sessions-regexp' last.  The Emacs window
+goes on to show the session chosen.  A session attached in this Emacs
+already is shown, not switched to."
   (interactive)
   (let ((controller (ghostel-tmux--active-controller)))
     (unless (buffer-live-p controller)
@@ -4204,11 +4236,11 @@ attached in this Emacs already is shown, not switched to."
   "Prompt for a session of `list-sessions' OUTPUT and move CONTROLLER to it.
 CONTROLLER can end while the prompt is open."
   (when (and (buffer-live-p controller) (not (active-minibuffer-window)))
-    (let* ((sessions (cl-remove (buffer-local-value 'ghostel-tmux--session-id
-                                                    controller)
-                                (ghostel-tmux--parse-session-rows
-                                 (ghostel-tmux--decode-text output))
-                                :key #'cdr))
+    (let* ((sessions (with-current-buffer controller
+                       (cl-remove ghostel-tmux--session-id
+                                  (ghostel-tmux--parse-session-rows
+                                   (ghostel-tmux--decode-text output))
+                                  :key #'cdr)))
            (name (if sessions
                      (with-local-quit
                        (ghostel-tmux--completing-read-session
