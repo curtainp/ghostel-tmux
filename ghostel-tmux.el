@@ -1001,37 +1001,42 @@ The selected window comes first."
           ghostel-tmux--session-name name)
     (cond
      (first
-      ;; Lines typed into a takeover host before this, reached tmux as
-      ;; commands: drop their replies and whatever reason they gave.  A
-      ;; line typed without RET joins the first line sent, so that line
-      ;; is a spare.
-      (when ghostel-tmux--dcs-active
-        (setq ghostel-tmux--exit-reason nil)
-        (ghostel-tmux--queue-until-marker "display-message -p ''" #'ignore))
-      ;; The server key, which makes sealed panes live again, and the
-      ;; rows in one write: one round trip.
-      (let ((command (concat "display-message -p '#{host} #{pid} #{start_time}'\n"
-                             ghostel-tmux--window-rows-command))
-            (key-done nil))
-        (letrec ((on-block
-                  (lambda (output)
-                    (cond
-                     ((and key-done output)
-                      (ghostel-tmux--receive-window-rows output t))
-                     (key-done
-                      ;; Without rows, nothing is to fill the window later.
-                      (setq ghostel-tmux--auto-host-window nil
-                            ghostel-tmux--auto-host-buffer nil)
-                      (message "Ghostel-tmux: tmux did not list the windows of %s"
-                               ghostel-tmux--session-name))
-                     (t
-                      (let ((key (and output (string-trim output))))
-                        (setq key-done t
-                              ghostel-tmux--server-key
-                              (and key (not (string-empty-p key)) key)
-                              ghostel-tmux--command-in-flight
-                              (cons command on-block))))))))
-          (ghostel-tmux--queue-command command on-block))))
+      ;; The panes do not wait for commands given before tmux started.
+      (let ((given ghostel-tmux--command-queue))
+        (setq ghostel-tmux--command-queue nil)
+        ;; Lines typed into a takeover host before this, reached tmux as
+        ;; commands: drop their replies and whatever reason they gave.  A
+        ;; line typed without RET joins the first line sent, so that line
+        ;; is a spare.
+        (when ghostel-tmux--dcs-active
+          (setq ghostel-tmux--exit-reason nil)
+          (ghostel-tmux--queue-until-marker "display-message -p ''" #'ignore))
+        ;; The server key, which makes sealed panes live again, and the
+        ;; rows in one write: one round trip.
+        (let ((command (concat "display-message -p '#{host} #{pid} #{start_time}'\n"
+                               ghostel-tmux--window-rows-command))
+              (key-done nil))
+          (letrec ((on-block
+                    (lambda (output)
+                      (cond
+                       ((and key-done output)
+                        (ghostel-tmux--receive-window-rows output t))
+                       (key-done
+                        ;; Without rows, nothing is to fill the window later.
+                        (setq ghostel-tmux--auto-host-window nil
+                              ghostel-tmux--auto-host-buffer nil)
+                        (message "Ghostel-tmux: tmux did not list the windows of %s"
+                                 ghostel-tmux--session-name))
+                       (t
+                        (let ((key (and output (string-trim output))))
+                          (setq key-done t
+                                ghostel-tmux--server-key
+                                (and key (not (string-empty-p key)) key)
+                                ghostel-tmux--command-in-flight
+                                (cons command on-block))))))))
+            (ghostel-tmux--queue-command command on-block)))
+        (setq ghostel-tmux--command-queue
+              (nconc ghostel-tmux--command-queue given))))
      (changed
       ;; Switching sessions resets pane state.  Wipe and reload; the
       ;; Emacs window goes on showing the new session.
@@ -1497,8 +1502,9 @@ Later changes arrive as notifications."
       (setq ghostel-tmux--active-pane-id active-pane))
     (when seed
       ;; Only in place of the attach's own message.
-      (when (string-prefix-p ghostel-tmux--attaching-message
-                             (or (current-message) ""))
+      (when (equal (current-message)
+                   (format "%s%s..." ghostel-tmux--attaching-message
+                           ghostel-tmux--session-name))
         (message "Ghostel-tmux: Attached to %s" ghostel-tmux--session-name))
       (ghostel-tmux--fill-kept-window kept))
     ;; All of the session's windows, in tmux's order; a window linked
@@ -3667,8 +3673,8 @@ A remote tmux can get a terminal, as from TRAMP's direct async
 processes: raw mode keeps it from echoing commands and from cutting
 long lines.  tmux is `ghostel-tmux--server', which the controller
 buffer keeps.  Unless NO-DISPLAY, the selected window waits for tmux's
-active pane while it shows the same buffer.  Returns the controller
-buffer."
+active pane while it shows the same buffer, and the echo area says that
+the attach started.  Returns the controller buffer."
   (let* ((server (or ghostel-tmux--server (ghostel-tmux--resolve-server)))
          (command `(,(car server) "-u" ,@(cdr server) "-C" ,@tmux-args))
          (control-buf (generate-new-buffer
@@ -3700,7 +3706,8 @@ buffer."
       ((error quit)
        (kill-buffer control-buf)
        (signal (car err) (cdr err))))
-    (message "%s%s..." ghostel-tmux--attaching-message session)
+    (unless no-display
+      (message "%s%s..." ghostel-tmux--attaching-message session))
     control-buf))
 
 (defun ghostel-tmux--apply-pane-size (pane-buf window &optional defer)
@@ -3935,9 +3942,10 @@ SESSION is an exact name.  tmux cannot address a name that starts with
 Returns the controller buffer before any pane is there: tmux's active
 pane takes the selected window once tmux reports it, unless the window
 shows another buffer by then.  With NO-DISPLAY non-nil, no window is
-to show it.  A session that this command or `ghostel-tmux-new' is
-attached to already is not attached again: its controller is returned,
-and the selected window shows the session unless NO-DISPLAY.
+to show it and the echo area does not report the attach.  A session
+that this command or `ghostel-tmux-new' is attached to already is not
+attached again: its controller is returned, and the selected window
+shows the session unless NO-DISPLAY.
 `ghostel-tmux-attach-hook' runs once the session's panes are there."
   (interactive
    (let* ((socket (ghostel-tmux--read-socket))
@@ -4366,7 +4374,8 @@ A command given before tmux has started is sent once it runs.  A
 command must not print just `ghostel-tmux-reply-end', which ends the
 answer.
 Detach with `ghostel-tmux-detach', not with a command.  BUFFER is as
-for `ghostel-tmux-controller'."
+for `ghostel-tmux-controller'.  Signals a `user-error' for an empty
+COMMAND, and when the session is not attached or its tmux is leaving."
   (let ((controller (ghostel-tmux-controller buffer))
         ;; An empty line makes tmux leave control mode.
         (lines (split-string command "\n" t "[ \t]+")))

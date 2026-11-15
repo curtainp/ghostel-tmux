@@ -4049,6 +4049,11 @@ attach started; the attach is reported as done only then."
   "An attach whose message is not in the echo area says nothing later."
   (should (ghostel-tmux-test--attach-rows nil "Saved")))
 
+(ert-deftest ghostel-tmux-test-attach-leaves-the-message-of-another-attach ()
+  "An attach says nothing in place of the message of another session's attach."
+  (should (ghostel-tmux-test--attach-rows
+           nil "Ghostel-tmux: Attaching to other...")))
+
 (ert-deftest ghostel-tmux-test-attach-shows-the-stand-in ()
   (ghostel-tmux-test--with-controller ctl
     (ghostel-tmux-test--with-floating-active-pane
@@ -7061,7 +7066,7 @@ PANES is a list of two variables, bound to the buffers of %5 in window
       (should (eq deleted 'fake-proc)))))
 
 (ert-deftest ghostel-tmux-test-commands-wait-for-tmux-to-start ()
-  "A command given before tmux's first line is written after it, in order."
+  "A command given before tmux's first line waits for it and the first rows."
   (ghostel-tmux-test--with-controller ctl
     (let ((sent nil)
           (replies nil))
@@ -7077,20 +7082,41 @@ PANES is a list of two variables, bound to the buffers of %5 in window
         (ghostel-tmux-test--feed ctl "stty: stdin isn't a terminal\n")
         (ghostel-tmux--pump-deferred ctl)
         (should-not sent)
-        ;; tmux's startup block and the session come in one read.
+        ;; tmux's startup block and the session come in one read: the
+        ;; session's windows are asked for first.
         (ghostel-tmux-test--feed
          ctl "%begin 1 1 0\n%end 1 1 0\n%session-changed $1 s\n")
         (should-not sent)
         (ghostel-tmux--pump-deferred ctl)
-        (should (equal sent
-                       (list (concat "select-window -t @1\ndisplay-message -p "
-                                     ghostel-tmux--typed-reply-end "\n"))))
-        (ghostel-tmux-test--feed ctl "%begin 1 2 1\n%end 1 2 1\n")
-        (ghostel-tmux-test--feed ctl ghostel-tmux-test--reply-end)
-        (should (equal replies '("")))
-        ;; The session's windows are asked for next.
+        (should (= (length sent) 1))
+        (should (string-search "list-windows" (car sent)))
+        (ghostel-tmux-test--feed
+         ctl "%begin 1 2 1\nhost 1 2\n%end 1 2 1\n%begin 1 3 1\n%end 1 3 1\n")
         (ghostel-tmux--pump-deferred ctl)
-        (should (string-search "list-windows" (car sent)))))))
+        (should (equal (car sent)
+                       (concat "select-window -t @1\ndisplay-message -p "
+                               ghostel-tmux--typed-reply-end "\n")))
+        (ghostel-tmux-test--feed ctl "%begin 1 4 1\n%end 1 4 1\n")
+        (ghostel-tmux-test--feed ctl ghostel-tmux-test--reply-end)
+        (should (equal replies '("")))))))
+
+(ert-deftest ghostel-tmux-test-first-rows-go-ahead-of-waiting-commands ()
+  "The first rows are asked for ahead of the commands that wait."
+  (ghostel-tmux-test--with-controller ctl
+    (cl-letf (((symbol-function 'ghostel-tmux--controller-send) #'ignore)
+              ((symbol-function 'ghostel-tmux--controller-live-p) #'always))
+      (setq ghostel-tmux--parser-state 'idle)
+      (ghostel-tmux--queue-command "first")
+      (ghostel-tmux--queue-command "second")
+      (ghostel-tmux--queue-command "third")
+      ;; "first" went before tmux named the session.
+      (should (equal (car ghostel-tmux--command-in-flight) "first"))
+      (ghostel-tmux-test--feed ctl "%session-changed $1 s\n")
+      (should (equal (car ghostel-tmux--command-in-flight) "first"))
+      (should (string-search "list-windows"
+                             (car (nth 0 ghostel-tmux--command-queue))))
+      (should (equal (mapcar #'car (cdr ghostel-tmux--command-queue))
+                     '("second" "third"))))))
 
 (ert-deftest ghostel-tmux-test-feed-entered-again-handles-each-line-once ()
   "Output that arrives while a hook function waits is handled once, in order."
@@ -7264,14 +7290,18 @@ PANES is a list of two variables, bound to the buffers of %5 in window
           (should (equal order '(hook pane))))))))
 
 (ert-deftest ghostel-tmux-test-attach-without-display-claims-no-window ()
-  "An attach with NO-DISPLAY leaves the windows alone and runs the hook."
+  "An attach with NO-DISPLAY leaves windows and echo area alone and runs the hook."
   (let* ((script (ghostel-tmux-test--script "sleep 5"))
          (ghostel-tmux-program script)
-         (ctl (ghostel-tmux-attach "s" nil t))
+         (said nil)
+         (ctl (cl-letf (((symbol-function 'message)
+                         (lambda (&rest args) (push args said))))
+                (ghostel-tmux-attach "s" nil t)))
          (runs 0)
          (ghostel-tmux-attach-hook (list (lambda () (cl-incf runs))))
          (seeds nil)
          shown)
+    (should-not said)
     (unwind-protect
         (cl-letf (((symbol-function 'ghostel-make-terminal)
                    (lambda (name &rest _) (generate-new-buffer name)))

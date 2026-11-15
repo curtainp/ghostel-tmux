@@ -246,7 +246,7 @@ window of several panes brings their split with it, see [[*Split windows][Split 
 
 | Function                                         | What it does                                                                     |
 |--------------------------------------------------+----------------------------------------------------------------------------------|
-| =(ghostel-tmux-attach SESSION SOCKET NO-DISPLAY)= | Attach and return the controller, at once.  With NO-DISPLAY, no window is to show the session.  =ghostel-tmux-new= takes the same arguments. |
+| =(ghostel-tmux-attach SESSION SOCKET NO-DISPLAY)= | Attach and return the controller, at once.  With NO-DISPLAY, no window is to show the session and the echo area does not report the attach.  =ghostel-tmux-new= takes the same arguments. |
 | =(ghostel-tmux-detach KEEP BUFFER)=                | Detach the session.                                                              |
 | =(ghostel-tmux-controllers)=                       | The controllers of the sessions attached in this Emacs.                          |
 | =(ghostel-tmux-controller BUFFER)=                 | The controller of BUFFER's session, =nil= for any other buffer and for a pane kept after a detach. |
@@ -271,12 +271,17 @@ the controller buffer:
 | =ghostel-tmux-notification-functions=   | For each notification of tmux's control mode except pane output, with the line as its argument, such as ="%window-renamed @1 name"=. |
 
 =ghostel-tmux-command= takes a command that answers with several replies
-or none, but detaching is for =ghostel-tmux-detach=.  A callback is not
-called when tmux leaves first; the detach hook runs then.  An attach
-says that it started and that it is done in the echo area, and neither
-with =inhibit-message= bound around the call.  With tmux's
-=refresh-client -B=, a package gets =%subscription-changed= notifications
-for the formats it wants to follow.
+or none, but detaching is for =ghostel-tmux-detach=.  It signals a
+=user-error= for an empty command, and for a session that is not attached
+or whose tmux is leaving.  A callback is not called when tmux leaves
+first; the detach hook runs then.  With tmux's =refresh-client -B=, a
+package gets =%subscription-changed= notifications for the formats it
+wants to follow.
+
+To show another buffer in place of a split, show it in one window of
+=ghostel-tmux-window-split= and delete the others: the window left then
+leaves the split.  A buffer shown in a window of the split can lose that
+window when tmux changes the panes.
 
 #+begin_src emacs-lisp
 ;; Attach in the background, and show the session once its panes are there.

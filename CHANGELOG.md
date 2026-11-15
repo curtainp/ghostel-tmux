@@ -18,8 +18,8 @@ All notable changes to this project will be documented in this file.
   `ghostel-tmux-detach-hook` when its tmux client ends, and
   `ghostel-tmux-notification-functions` for each notification of tmux.
 - `ghostel-tmux-attach` and `ghostel-tmux-new` take NO-DISPLAY: no window
-  is to show the session.  `ghostel-tmux-detach` takes the BUFFER whose
-  session to detach.
+  is to show the session, and the echo area does not report the attach.
+  `ghostel-tmux-detach` takes the BUFFER whose session to detach.
 
 ### Changed
 - `ghostel-tmux-attach` and `ghostel-tmux-new` show a session that one
