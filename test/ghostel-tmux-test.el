@@ -1516,6 +1516,21 @@ and neither does the controller that is current then."
           (ghostel-tmux--pick-session ctl ghostel-tmux-test--session-rows))
         (should (null sent))))))
 
+(defun ghostel-tmux-test--on-server (key id name)
+  "Make the current controller one of server KEY, on session ID named NAME."
+  (setq ghostel-tmux--controller-process 'fake-proc
+        ghostel-tmux--server-key key
+        ghostel-tmux--session-id id
+        ghostel-tmux--session-name name))
+
+(defmacro ghostel-tmux-test--capturing-sessions (shown &rest body)
+  "Run BODY, collecting in SHOWN the controllers whose session is shown."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'ghostel-tmux--attach-pane) #'current-buffer)
+             ((symbol-function 'ghostel-tmux--display-pane-in-window)
+              (lambda (pane _window) (push pane ,shown))))
+     ,@body))
+
 (ert-deftest ghostel-tmux-test-switch-session-offers-a-skipped-session-last ()
   (let ((ghostel-tmux-skip-sessions-regexp "\\`my "))
     (ghostel-tmux-test--with-controller ctl
@@ -1545,6 +1560,125 @@ and neither does the controller that is current then."
           (setq default-directory temporary-file-directory)
           (ghostel-tmux--pick-session ctl ghostel-tmux-test--session-rows))))
     (should (equal offered '("old" "busy" "my proj")))))
+
+(ert-deftest ghostel-tmux-test-switch-session-offers-another-server ()
+  "A session attached on another server is offered last and shown when picked."
+  (ghostel-tmux-test--with-controller other
+    (ghostel-tmux-test--on-server "box 9 9" 3 "x2")
+    (let (shown)
+      (ghostel-tmux-test--with-controller ctl
+        (ghostel-tmux-test--capturing-sessions shown
+          (ghostel-tmux-test--with-session-picker ctl "x2@box"
+            (should (equal offered '("my proj" "old" "busy" "x2@box")))
+            (should (null sent))
+            (should (equal shown (list other)))))))))
+
+(ert-deftest ghostel-tmux-test-switch-session-opens-with-another-server ()
+  "Without another session of this server, those of other servers are offered."
+  (ghostel-tmux-test--with-controller other
+    (ghostel-tmux-test--on-server "box 9 9" 3 "x2")
+    (ghostel-tmux-test--with-controller ctl
+      (let (sent offered shown)
+        (ghostel-tmux-test--with-wire ctl sent
+          (ghostel-tmux-test--on-server "host 1 2" 0 "main")
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt table &rest args)
+                       (setq offered (all-completions "" table))
+                       (nth 4 args))))
+            (ghostel-tmux-test--capturing-sessions shown
+              (ghostel-tmux--pick-session ctl "$0 1 300 main\n")))
+          (should (equal offered '("x2@box")))
+          (should (equal shown (list other)))
+          (should (null sent)))))))
+
+(ert-deftest ghostel-tmux-test-sessions-elsewhere-need-a-server-and-a-session ()
+  "A controller is offered once its server and session are known, while it lives."
+  (ghostel-tmux-test--with-controller no-key
+    (ghostel-tmux-test--on-server nil 3 "a")
+    (ghostel-tmux-test--with-controller no-session
+      (ghostel-tmux-test--on-server "box 9 9" nil "b")
+      (ghostel-tmux-test--with-controller closing
+        (ghostel-tmux-test--on-server "box 8 8" 3 "c")
+        (setq ghostel-tmux--closing t)
+        (ghostel-tmux-test--with-controller same-server
+          (ghostel-tmux-test--on-server "host 1 2" 3 "d")
+          (ghostel-tmux-test--with-controller ctl
+            (cl-letf (((symbol-function 'process-live-p) #'always))
+              (ghostel-tmux-test--on-server "host 1 2" 0 "main")
+              (should-not (ghostel-tmux--sessions-elsewhere))
+              (with-current-buffer closing
+                (setq ghostel-tmux--closing nil))
+              (should (equal (ghostel-tmux--sessions-elsewhere)
+                             (list (cons "c@box" closing))))
+              ;; Which server is another one is unknown without our key.
+              (setq ghostel-tmux--server-key nil)
+              (should-not (ghostel-tmux--sessions-elsewhere)))))))))
+
+(ert-deftest ghostel-tmux-test-sessions-elsewhere-have-distinct-labels ()
+  "Two servers of one host with a session of the same name read differently.
+A session two controllers hold is offered once."
+  (ghostel-tmux-test--with-controller first
+    (ghostel-tmux-test--on-server "box 7 1" 3 "x2")
+    (ghostel-tmux-test--with-controller second
+      (ghostel-tmux-test--on-server "box 9 1" 0 "x2")
+      (ghostel-tmux-test--with-controller twin
+        (ghostel-tmux-test--on-server "box 9 1" 0 "x2")
+        (ghostel-tmux-test--with-controller ctl
+          (cl-letf (((symbol-function 'process-live-p) #'always))
+            (ghostel-tmux-test--on-server "host 1 2" 0 "main")
+            (let ((entries (ghostel-tmux--sessions-elsewhere)))
+              (should (equal (mapcar #'car entries) '("x2@box" "x2@box:9")))
+              (should (eq (cdr (assoc "x2@box" entries)) first))
+              ;; Of two controllers on one session, the first of the buffer list.
+              (should (eq (cdr (assoc "x2@box:9" entries))
+                          (seq-find (lambda (buf) (memq buf (list second twin)))
+                                    (buffer-list)))))))))))
+
+(ert-deftest ghostel-tmux-test-sessions-elsewhere-are-sorted-by-label ()
+  (ghostel-tmux-test--with-controller first
+    (ghostel-tmux-test--on-server "a 1 1" 0 "m")
+    (ghostel-tmux-test--with-controller second
+      (ghostel-tmux-test--on-server "b 1 1" 0 "z")
+      (ghostel-tmux-test--with-controller third
+        (ghostel-tmux-test--on-server "c 1 1" 0 "a")
+        (ghostel-tmux-test--with-controller ctl
+          (cl-letf (((symbol-function 'process-live-p) #'always))
+            (ghostel-tmux-test--on-server "host 1 2" 0 "main")
+            (should (equal (ghostel-tmux--sessions-elsewhere)
+                           (list (cons "a@c" third) (cons "m@a" first)
+                                 (cons "z@b" second))))))))))
+
+(ert-deftest ghostel-tmux-test-switch-session-other-server-ends-at-the-prompt ()
+  "A controller of another server that ended at the prompt is not shown."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((other (generate-new-buffer " *ghostel-tmux-test-gone*"))
+          sent shown)
+      (with-current-buffer other
+        (ghostel-tmux-control-mode)
+        (ghostel-tmux-test--on-server "box 9 9" 3 "x2"))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--on-server "host 1 2" 0 "main")
+        (ghostel-tmux-test--capturing-sessions shown
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt table &rest _)
+                       (should (member "x2@box" (all-completions "" table)))
+                       (with-current-buffer other
+                         (setq ghostel-tmux--closing t))
+                       "x2@box")))
+            (ghostel-tmux--pick-session ctl ghostel-tmux-test--session-rows))
+          (with-current-buffer other
+            (setq ghostel-tmux--closing nil))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt table &rest _)
+                       (should (member "x2@box" (all-completions "" table)))
+                       ;; The hooks of a killed controller want a process.
+                       (with-current-buffer other
+                         (setq ghostel-tmux--controller-process nil))
+                       (kill-buffer other)
+                       "x2@box")))
+            (ghostel-tmux--pick-session ctl ghostel-tmux-test--session-rows)))
+        (should (null shown))
+        (should (null sent))))))
 
 (ert-deftest ghostel-tmux-test-session-prefix-keys ()
   "`s' picks a session, `w' a pane, and `(', `)' and `L' cycle sessions."

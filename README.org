@@ -23,7 +23,7 @@ tabs in the tab line.
 | =M-x ghostel-tmux-capture=                        | One-shot snapshot: dump a single pane's scrollback into a fresh buffer (no live link).  |
 | =M-x ghostel-tmux-next-pane= / =ghostel-tmux-prev-pane= | Cycle through sibling panes, across tmux windows (=C-t C-n= / =C-t C-p=).              |
 | =M-x ghostel-tmux-switch-pane=                    | =completing-read= picker over sibling panes (=C-t w=).                                    |
-| =M-x ghostel-tmux-switch-session=                 | =completing-read= picker over the server's other sessions (=C-t s=).                      |
+| =M-x ghostel-tmux-switch-session=                 | =completing-read= picker over the server's other sessions and the sessions this Emacs is attached to on other servers (=C-t s=). |
 | =M-x ghostel-tmux-restore-split=                  | Split the window's tmux window again as tmux lays it out (=C-t r=).                      |
 | =M-x ghostel-tmux-reset=                          | Escape hatch: reset tmux state when the protocol parser is wedged.                      |
 
@@ -36,7 +36,8 @@ A session that =ghostel-tmux-new= or =ghostel-tmux-attach= is attached to alread
 gets no second client: the selected window shows it.  =C-t s= moves the client
 to another session, whose panes take the place of the ones shown; a session
 picked there that is attached in this Emacs already is shown instead, and no
-client moves.
+client moves.  The sessions this Emacs is attached to on other tmux servers are
+offered too, as =NAME@HOST=, and shown the same way.
 
 =ghostel-tmux-socket= selects a tmux server other than the default one.  With a
 prefix argument, =ghostel-tmux-new= and =ghostel-tmux-capture= prompt for it,

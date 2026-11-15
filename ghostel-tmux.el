@@ -4216,7 +4216,9 @@ a window at any time."
 The sessions are offered in the order in which tmux would attach them,
 those of `ghostel-tmux-skip-sessions-regexp' last.  The Emacs window
 goes on to show the session chosen.  A session attached in this Emacs
-already is shown, not switched to."
+already is shown, not switched to.  That goes for the sessions this
+Emacs is attached to on other tmux servers too, which are offered as
+NAME@HOST after those of the server."
   (interactive)
   (let ((controller (ghostel-tmux--active-controller)))
     (unless (buffer-live-p controller)
@@ -4234,31 +4236,79 @@ already is shown, not switched to."
 
 (defun ghostel-tmux--pick-session (controller output)
   "Prompt for a session of `list-sessions' OUTPUT and move CONTROLLER to it.
-CONTROLLER can end while the prompt is open."
+The sessions of `ghostel-tmux--sessions-elsewhere' are offered too, and
+shown when picked.  A controller can end while the prompt is open."
   (when (and (buffer-live-p controller) (not (active-minibuffer-window)))
-    (let* ((sessions (with-current-buffer controller
-                       (cl-remove ghostel-tmux--session-id
-                                  (ghostel-tmux--parse-session-rows
-                                   (ghostel-tmux--decode-text output))
-                                  :key #'cdr)))
+    (let* ((sessions
+            (with-current-buffer controller
+              (append (cl-remove ghostel-tmux--session-id
+                                 (ghostel-tmux--parse-session-rows
+                                  (ghostel-tmux--decode-text output))
+                                 :key #'cdr)
+                      (ghostel-tmux--sessions-elsewhere))))
            (name (if sessions
                      (with-local-quit
                        (ghostel-tmux--completing-read-session
                         "Switch to tmux session" (mapcar #'car sessions)))
                    (message "Ghostel-tmux: No other tmux session")
                    nil))
-           (id (cdr (assoc name sessions))))
-      (when (and id (buffer-live-p controller))
+           (target (cdr (assoc name sessions))))
+      (cond
+       ((bufferp target) (ghostel-tmux--show-session target))
+       ((and target (buffer-live-p controller))
         (with-current-buffer controller
-          (let ((other (ghostel-tmux--session-controller id)))
+          (let ((other (ghostel-tmux--session-controller target)))
             (cond
-             (other
-              (with-current-buffer other
-                (when-let* ((pane (ghostel-tmux--attach-pane)))
-                  (ghostel-tmux--display-pane-in-window
-                   pane (selected-window)))))
+             (other (ghostel-tmux--show-session other))
              ((ghostel-tmux--controller-live-p)
-              (ghostel-tmux--cmd (format "switch-client -t $%d" id))))))))))
+              (ghostel-tmux--cmd
+               (format "switch-client -t $%d" target)))))))))))
+
+(defun ghostel-tmux--show-session (controller)
+  "Show the session of CONTROLLER in the selected window.
+That is its active pane, while CONTROLLER is a live controller."
+  (when (buffer-live-p controller)
+    (with-current-buffer controller
+      (when-let* (((ghostel-tmux--controller-live-p))
+                  ((not ghostel-tmux--closing))
+                  (pane (ghostel-tmux--attach-pane)))
+        (ghostel-tmux--display-pane-in-window pane (selected-window))))))
+
+(defun ghostel-tmux--sessions-elsewhere ()
+  "Return the sessions attached on other tmux servers as (LABEL . CONTROLLER).
+They are those of the live controllers of this Emacs whose server is
+known and is not the server of this controller.  LABEL is NAME@HOST,
+with fields of the server key added after `:' where two would read the
+same, and sorts the list."
+  (let* ((server-key ghostel-tmux--server-key)
+         (session (lambda (buf)
+                    (cons (buffer-local-value 'ghostel-tmux--server-key buf)
+                          (buffer-local-value 'ghostel-tmux--session-id buf))))
+         (others (and server-key
+                      (cl-remove-if-not
+                       (lambda (buf)
+                         (with-current-buffer buf
+                           (and (not ghostel-tmux--closing)
+                                ghostel-tmux--server-key
+                                (not (equal ghostel-tmux--server-key
+                                            server-key))
+                                ghostel-tmux--session-id)))
+                       (ghostel-tmux-controllers))))
+         entries)
+    ;; The order of the server keys, not of the buffer list, decides which
+    ;; of two sessions that read the same has the short label.
+    (dolist (buf (sort (cl-remove-duplicates others :key session :test #'equal
+                                             :from-end t)
+                       (lambda (a b)
+                         (string< (car (funcall session a))
+                                  (car (funcall session b))))))
+      (let* ((fields (split-string (car (funcall session buf)) " " t))
+             (label (concat (buffer-local-value 'ghostel-tmux--session-name buf)
+                            "@" (pop fields))))
+        (while (and fields (assoc label entries))
+          (setq label (concat label ":" (pop fields))))
+        (push (cons label buf) entries)))
+    (sort entries (lambda (a b) (string< (car a) (car b))))))
 
 (defun ghostel-tmux--session-controller (id)
   "Return another live controller attached to session ID of this server."
