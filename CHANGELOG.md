@@ -4,7 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-15
+
 ### Added
+- `ghostel-tmux-switch-session`, on `C-t s`, moves the client to another
+  session of the server with `switch-client`, also in the takeover.  A
+  session another controller of this Emacs is attached to, on this
+  server or on another one (offered as NAME@HOST), is shown in the
+  selected window instead.  `C-t (`, `C-t )` and `C-t L` switch to the
+  previous, the next and the last session.
+- `ghostel-tmux-skip-sessions-regexp` keeps matching sessions out of the
+  automatic attach and puts them last in the session prompts.
 - Functions for packages that build on ghostel-tmux, see "For other
   packages" in the README: `ghostel-tmux-controller`,
   `ghostel-tmux-controllers`, `ghostel-tmux-session-name`,
@@ -22,6 +32,12 @@ All notable changes to this project will be documented in this file.
   `ghostel-tmux-detach` takes the BUFFER whose session to detach.
 
 ### Changed
+- `ghostel-tmux-attach` without a prefix argument attaches the session
+  `tmux attach` would pick instead of asking; with one it asks, also
+  when there is only one session, and with two it asks for the socket
+  first.
+- The pane picker `ghostel-tmux-switch-pane` moves from `C-t s` to
+  `C-t w`.
 - `ghostel-tmux-attach` and `ghostel-tmux-new` show a session that one
   of them is attached to already in the selected window and return its
   controller, where they started a second tmux client.
@@ -39,6 +55,9 @@ All notable changes to this project will be documented in this file.
   has closed.
 - A takeover whose tmux leaves while a minibuffer is open shows the
   shell again once it has closed.
+- Commands wait until tmux has started, so that a shell over TRAMP
+  that reads ahead does not take them.  `ghostel-tmux-detach` of a
+  session whose tmux has not answered yet ends the process.
 
 ## [0.3.0] — 2026-11-14
 
