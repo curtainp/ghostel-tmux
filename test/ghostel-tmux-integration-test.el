@@ -41,7 +41,7 @@ while IFS= read -r line; do
     *alternate_on*)
       printf '%%begin %d %d 1\\n0,0,0,16,1,1,1,0,0,0,1,0,0,0,0,0,0,1,2,0,0\\n%%end %d %d 1\\n' $i $i $i $i ;;
     list-windows*)
-      printf '%%begin %d %d 1\\n@0\\t%%0\\t1\\tmain\\tbd5b,80x24,0,0,0\\tbd5b,80x24,0,0,0\\n%%end %d %d 1\\n' $i $i $i $i ;;
+      printf '%%begin %d %d 1\\n@0\\t0\\t%%0\\t1\\tmain\\tbd5b,80x24,0,0,0\\tbd5b,80x24,0,0,0\\n%%end %d %d 1\\n' $i $i $i $i ;;
     capture-pane*)
       printf '%%begin %d %d 1\\nHISTORY_LINE_ONE\\nVISIBLE_PROMPT$ \\n%%end %d %d 1\\n' $i $i $i $i
       printf '%%output %%0 BANNER_FROM_LIVE\\n' ;;

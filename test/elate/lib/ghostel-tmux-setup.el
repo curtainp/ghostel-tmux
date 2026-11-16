@@ -245,5 +245,31 @@ Each window shows its pane, at the columns and rows tmux gives the pane."
   (not (seq-some (lambda (w) (window-parameter w 'ghostel-tmux-tile))
                  (window-list-1 nil 'no-mini t))))
 
+(defun elate-tmux-tab (buffer)
+  "Return the tab of the tmux window of the pane in BUFFER."
+  (with-current-buffer (buffer-local-value 'ghostel-tmux--controller-buffer buffer)
+    (ghostel-tmux--window-tab
+     (buffer-local-value 'ghostel-tmux--window-id buffer) nil)))
+
+(defun elate-tmux-tab-face-p (buffer face)
+  "Non-nil when the tab of the tmux window of the pane in BUFFER has FACE."
+  (memq face (ensure-list (get-text-property 1 'face (elate-tmux-tab buffer)))))
+
+(defun elate-tmux-tab-plain-p (buffer)
+  "Non-nil when the tab of the tmux window of the pane in BUFFER has no mark."
+  (not (or (elate-tmux-tab-face-p buffer 'ghostel-tmux-tab-activity)
+           (elate-tmux-tab-face-p buffer 'ghostel-tmux-tab-bell))))
+
+(defun elate-tmux-tab-status (buffer)
+  "Return the program status the tab of the pane in BUFFER shows, or nil.
+That is the label of the pane's status when the tab's text has it."
+  (when-let* ((label (ghostel-status-label
+                      (buffer-local-value 'ghostel-program-status buffer))))
+    (and (string-search label (elate-tmux-tab buffer)) label)))
+
+(defun elate-tmux-type (buffer &rest keys)
+  "Send KEYS with `send-keys' to the pane in BUFFER, outside control mode."
+  (apply #'elate-tmux-call "send-keys" "-t" (elate-tmux-id buffer) keys))
+
 (provide 'ghostel-tmux-setup)
 ;;; ghostel-tmux-setup.el ends here

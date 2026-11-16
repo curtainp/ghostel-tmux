@@ -1031,8 +1031,8 @@ fills its output queue between the two repeats the CR."
     (setq ghostel-tmux--window-order '(0 1 2 3))
     (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change) #'ignore))
       (ghostel-tmux--receive-window-rows
-       (concat "@0\t%0\t1\tw\tl\tv\n@3\t%3\t0\tw\tl\tv\n"
-               "@1\t%1\t0\tw\tl\tv\n@2\t%2\t0\tw\tl\tv\n")))
+       (concat "@0\t0\t%0\t1\tw\tl\tv\n@3\t3\t%3\t0\tw\tl\tv\n"
+               "@1\t1\t%1\t0\tw\tl\tv\n@2\t2\t%2\t0\tw\tl\tv\n")))
     (should (equal ghostel-tmux--window-order '(0 3 1 2)))))
 
 (ert-deftest ghostel-tmux-test-window-rows-list-a-linked-window-once ()
@@ -1048,7 +1048,7 @@ fills its output queue between the two repeats the CR."
             (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change)
                        #'ignore))
               (ghostel-tmux--receive-window-rows
-               "@0\t%0\t1\tw\tl\tv\n@1\t%1\t0\tw\tl\tv\n@0\t%0\t0\tw\tl\tv\n"))
+               "@0\t0\t%0\t1\tw\tl\tv\n@1\t1\t%1\t0\tw\tl\tv\n@0\t0\t%0\t0\tw\tl\tv\n"))
             (should (equal ghostel-tmux--window-order '(0 1)))
             (should (equal (ghostel-tmux--pane-list ctl) (list pane))))
         (kill-buffer pane)))))
@@ -1058,7 +1058,7 @@ fills its output queue between the two repeats the CR."
   (ghostel-tmux-test--with-controller ctl
     (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change) #'ignore))
       (ghostel-tmux--receive-window-rows
-       "@4_%0_1_my_name_a,80x24,0,0,0_a,80x24,0,0,0\n@2_%1_0_w_a,80x24,0,0,1_\n"))
+       "@4_0_%0_1_my_name_a,80x24,0,0,0_a,80x24,0,0,0\n@2_1_%1_0_w_a,80x24,0,0,1_\n"))
     (should (equal ghostel-tmux--window-order '(4 2)))))
 
 (ert-deftest ghostel-tmux-test-window-rows-without-a-row-keep-the-order ()
@@ -1789,7 +1789,8 @@ A session two controllers hold is offered once."
                    (lambda (b w &rest _) (push (cons b w) resized))))
           (with-current-buffer buf
             (ghostel-tmux-pane-mode 1)
-            (setq-local ghostel-tmux--controller-buffer buf)
+            (setq-local ghostel-tmux--controller-buffer buf
+                        ghostel-tmux--windows (make-hash-table))
             (cl-letf (((symbol-function 'window-live-p) (lambda (_) t))
                       ((symbol-function 'window-buffer)
                        (lambda (_) buf)))
@@ -1807,7 +1808,8 @@ A session two controllers hold is offered once."
         (cl-letf (((symbol-function 'ghostel-tmux--apply-pane-size)
                    (lambda (b w &rest _) (push (cons b w) resized))))
           (with-current-buffer buf
-            (setq-local ghostel-tmux--controller-buffer buf))
+            (setq-local ghostel-tmux--controller-buffer buf
+                        ghostel-tmux--windows (make-hash-table)))
           (with-temp-buffer
             (cl-letf (((symbol-function 'window-live-p) (lambda (_) t))
                       ((symbol-function 'window-buffer)
@@ -1825,7 +1827,8 @@ A session two controllers hold is offered once."
         (cl-letf (((symbol-function 'ghostel-tmux--apply-pane-size)
                    (lambda (b w &rest _) (push (cons b w) resized))))
           (with-current-buffer buf
-            (setq-local ghostel-tmux--controller-buffer buf))
+            (setq-local ghostel-tmux--controller-buffer buf
+                        ghostel-tmux--windows (make-hash-table)))
           (with-temp-buffer
             (cl-letf (((symbol-function 'window-live-p) (lambda (_) t))
                       ((symbol-function 'window-buffer)
@@ -2397,7 +2400,7 @@ A later answer clears the pid an earlier one set."
   ;; Window names containing spaces (common with auto-rename) must
   ;; round-trip through the tab-delimited list-windows format.
   (ghostel-tmux-test--with-controller ctl
-    (let ((row "@7\t%3\t0\tpython -m foo\tbd5b,80x24,0,0,3\t"))
+    (let ((row "@7\t7\t%3\t0\tpython -m foo\tbd5b,80x24,0,0,3\t"))
       (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change)
                  (lambda (wid layout &rest _)
                    (should (= wid 7))
@@ -2433,9 +2436,9 @@ A later answer clears the pid an earlier one set."
         (ghostel-tmux-test--with-window-pane ctl pane
           (ghostel-tmux-test--feed ctl "%window-close @0\r\n")
           (ghostel-tmux--pump-deferred ctl)
-          (should (equal (car sent) "list-windows -F \"#{window_id}\"\n"))
+          (should (equal (car sent) "list-windows -F \"#{window_id} #{window_index}\"\n"))
           (should (buffer-live-p pane))
-          (ghostel-tmux-test--reply ctl "@1\r\n")
+          (ghostel-tmux-test--reply ctl "@1 0\r\n")
           (should-not (gethash 0 ghostel-tmux--windows))
           (should-not (gethash 5 ghostel-tmux--panes))
           (should-not (memq 0 ghostel-tmux--window-order))
@@ -2449,7 +2452,7 @@ A later answer clears the pid an earlier one set."
         (ghostel-tmux-test--with-window-pane ctl pane
           (ghostel-tmux-test--feed ctl "%window-close @0\r\n")
           (ghostel-tmux--pump-deferred ctl)
-          (ghostel-tmux-test--reply ctl "@0\r\n@1\r\n")
+          (ghostel-tmux-test--reply ctl "@0 0\r\n@1 1\r\n")
           (should (gethash 0 ghostel-tmux--windows))
           (should (eq (gethash 5 ghostel-tmux--panes) pane))
           (should (memq 0 ghostel-tmux--window-order))
@@ -2465,7 +2468,7 @@ A later answer clears the pid an earlier one set."
             (setq ghostel-tmux--window-id 1))
           (ghostel-tmux-test--feed ctl "%window-close @0\r\n")
           (ghostel-tmux--pump-deferred ctl)
-          (ghostel-tmux-test--reply ctl "@1\r\n")
+          (ghostel-tmux-test--reply ctl "@1 0\r\n")
           (should-not (gethash 0 ghostel-tmux--windows))
           (should (eq (gethash 5 ghostel-tmux--panes) pane))
           (should (buffer-live-p pane)))))))
@@ -2541,17 +2544,17 @@ A later answer clears the pid an earlier one set."
       (ghostel-tmux--dispatch-notification (concat "%window-renamed @1 " name)))
     (should (equal seen (list text text text)))
     (should (equal (nth 3 (ghostel-tmux--parse-window-row
-                           (concat "@1\t%2\t1\t" name "\tlayout\tvisible")))
+                           (concat "@1\t1\t%2\t1\t" name "\tlayout\tvisible")))
                    text))))
 
 (ert-deftest ghostel-tmux-test-window-row-of-a-client-without-utf-8 ()
   "tmux sends such a client `_' for every tab and non-ASCII character."
   (should (equal (ghostel-tmux--parse-window-row
-                  "@1_%2_1_f_n_ster_bd5b,80x24,0,0,2_bd5b,80x24,0,0,2")
-                 '(1 2 t "f_n_ster" "bd5b,80x24,0,0,2" "bd5b,80x24,0,0,2")))
+                  "@1_4_%2_1_f_n_ster_bd5b,80x24,0,0,2_bd5b,80x24,0,0,2")
+                 '(1 2 t "f_n_ster" "bd5b,80x24,0,0,2" "bd5b,80x24,0,0,2" 4)))
   (should (equal (ghostel-tmux--parse-window-row
-                  "@1\t%2\t0\tfoo_bar\tbd5b,80x24,0,0,2\t")
-                 '(1 2 nil "foo_bar" "bd5b,80x24,0,0,2" ""))))
+                  "@1\t1\t%2\t0\tfoo_bar\tbd5b,80x24,0,0,2\t")
+                 '(1 2 nil "foo_bar" "bd5b,80x24,0,0,2" "" 1))))
 
 (ert-deftest ghostel-tmux-test-process-file-is-utf-8-in-any-locale ()
   "Session names and targets do not depend on the locale's coding system."
@@ -2872,8 +2875,9 @@ a prefix argument asks for one")))))
     (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change)
                (lambda (wid layout &rest _)
                  (setq seen-wid wid seen-layout layout))))
-      (ghostel-tmux--dispatch-notification
-       "%layout-change @4 b33d,80x24,0,0,0 b33d,80x24,0,0,0 ")
+      (ghostel-tmux-test--with-controller ctl
+        (ghostel-tmux--dispatch-notification
+         "%layout-change @4 b33d,80x24,0,0,0 b33d,80x24,0,0,0 "))
       (should (= seen-wid 4))
       (should (equal seen-layout "b33d,80x24,0,0,0")))))
 
@@ -3215,7 +3219,7 @@ a prefix argument asks for one")))))
                      (lambda (buf window) (setq shown (cons buf window)))))
             (with-current-buffer ctl
               (ghostel-tmux--receive-window-rows
-               "@0\t%6\t1\tw\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6" t)))
+               "@0\t0\t%6\t1\tw\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6" t)))
           (should (equal shown (cons pane (selected-window))))
           (should-not (buffer-local-value 'ghostel-tmux--auto-host-window ctl))
           (should-not (buffer-local-value 'ghostel-tmux--auto-host-buffer ctl)))
@@ -3808,12 +3812,13 @@ tmux sends the layout that unzooms before the report of the selection."
     (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change)
                (lambda (_wid _layout visible flags)
                  (setq seen (list visible flags)))))
-      (ghostel-tmux--dispatch-notification
-       "%layout-change @4 b33d,80x24,0,0,0 a,b *Z")
-      (should (equal seen '("a,b" "*Z")))
-      (ghostel-tmux--dispatch-notification
-       "%layout-change @4 b33d,80x24,0,0,0 a,b ")
-      (should (equal seen '("a,b" ""))))))
+      (ghostel-tmux-test--with-controller ctl
+        (ghostel-tmux--dispatch-notification
+         "%layout-change @4 b33d,80x24,0,0,0 a,b *Z")
+        (should (equal seen '("a,b" "*Z")))
+        (ghostel-tmux--dispatch-notification
+         "%layout-change @4 b33d,80x24,0,0,0 a,b ")
+        (should (equal seen '("a,b" "")))))))
 
 (ert-deftest ghostel-tmux-test-ensure-pane-zoomed-zooms-unzoomed-window ()
   ;; The flag is read from the pane's own window, so a pane shown from
@@ -3999,7 +4004,7 @@ tmux sends the layout that unzooms before the report of the selection."
                                ghostel-tmux--active-pane-id)
                          seen))))
         (ghostel-tmux--receive-window-rows
-         "@0\t%0\t0\ta\tbd5b,80x24,0,0,0\t\n@1\t%2\t1\tb\tbd5b,80x24,0,0,2\t"
+         "@0\t0\t%0\t0\ta\tbd5b,80x24,0,0,0\t\n@1\t1\t%2\t1\tb\tbd5b,80x24,0,0,2\t"
          t))
       (should (equal (reverse seen) '((0 1 nil) (1 1 nil))))
       (should (eql ghostel-tmux--active-pane-id 2)))))
@@ -4011,7 +4016,7 @@ tmux sends the layout that unzooms before the report of the selection."
       (setq ghostel-tmux--current-window-id 0
             ghostel-tmux--active-pane-id 0)
       (ghostel-tmux--receive-window-rows
-       "@0\t%0\t0\ta\tbd5b,80x24,0,0,0\t\n@1\t%2\t1\tb\tbd5b,80x24,0,0,2\t"
+       "@0\t0\t%0\t0\ta\tbd5b,80x24,0,0,0\t\n@1\t1\t%2\t1\tb\tbd5b,80x24,0,0,2\t"
        t)
       (should (eql ghostel-tmux--current-window-id 0))
       (should (eql ghostel-tmux--active-pane-id 0)))))
@@ -4021,7 +4026,7 @@ tmux sends the layout that unzooms before the report of the selection."
   ;; the old one after a switch, or one grouped with ours.
   (ghostel-tmux-test--with-controller ctl
     (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change) #'ignore))
-      (ghostel-tmux--receive-window-rows "@3\t%7\t1\ta\tbd5b,80x24,0,0,7\t")
+      (ghostel-tmux--receive-window-rows "@3\t3\t%7\t1\ta\tbd5b,80x24,0,0,7\t")
       (should-not ghostel-tmux--current-window-id)
       (should-not ghostel-tmux--active-pane-id))))
 
@@ -4048,7 +4053,7 @@ tmux sends the layout that unzooms before the report of the selection."
             (ghostel-tmux--on-session-window-changed 1 0)
             (setq followed nil)
             (ghostel-tmux--receive-window-rows
-             "@3\t%7\t0\tn\tbd5b,80x24,0,0,7\t")
+             "@3\t3\t%7\t0\tn\tbd5b,80x24,0,0,7\t")
             (should (null followed))
             (should (eql ghostel-tmux--active-pane-id 5)))
         (kill-buffer a)
@@ -4079,7 +4084,7 @@ SPEC is (FOLLOWED): that variable collects followed panes."
   (ghostel-tmux-test--with-controller ctl
     (ghostel-tmux-test--with-pending-window (followed)
       (ghostel-tmux--receive-window-rows
-       "@3\t%8\t1\tn\tbd5b,80x24,0,0{40x24,0,0,7,39x24,41,0,8}\t")
+       "@3\t3\t%8\t1\tn\tbd5b,80x24,0,0{40x24,0,0,7,39x24,41,0,8}\t")
       (should (eql ghostel-tmux--active-pane-id 8))
       (should (eql (car followed) 8))
       (should-not ghostel-tmux--pending-follow-wid))))
@@ -4165,7 +4170,7 @@ SPEC is (FOLLOWED): that variable collects followed panes."
               (should (null shown))
               (should ghostel-tmux--auto-host-window)
               (ghostel-tmux--receive-window-rows
-               (format "@2\t%%2\t1\tw\t%s\t" layout) t))
+               (format "@2\t2\t%%2\t1\tw\t%s\t" layout) t))
             (should (equal shown (list b)))
             (should (eql ghostel-tmux--active-pane-id 2)))
         (kill-buffer a)
@@ -4214,8 +4219,8 @@ SPEC is (FOLLOWED): that variable collects followed panes."
                      (lambda (buf _window) (push buf shown))))
             (setq ghostel-tmux--auto-host-window (selected-window))
             (ghostel-tmux--receive-window-rows
-             (concat "@0\t%0\t0\ta\tbd5b,80x24,0,0,0\t\n"
-                     "@1\t%3\t1\tb\tbd5b,80x24,0,0{40x24,0,0,2,39x24,41,0,3}\t")
+             (concat "@0\t0\t%0\t0\ta\tbd5b,80x24,0,0,0\t\n"
+                     "@1\t1\t%3\t1\tb\tbd5b,80x24,0,0{40x24,0,0,2,39x24,41,0,3}\t")
              t)
             (should (equal shown (list c)))
             (should-not ghostel-tmux--auto-host-window))
@@ -4446,7 +4451,7 @@ attach started; the attach is reported as done only then."
                      (lambda () (or echo "Ghostel-tmux: Attaching to s..."))))
             (with-current-buffer ctl
               (ghostel-tmux--receive-window-rows
-               "@0\t%6\t1\tw\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6" t)
+               "@0\t0\t%6\t1\tw\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6" t)
               (should-not ghostel-tmux--auto-host-window)
               (should (eq (null echo)
                           (and (member "Ghostel-tmux: Attached to s" messages)
@@ -4482,7 +4487,7 @@ attach started; the attach is reported as done only then."
           (setq ghostel-tmux--auto-host-window (selected-window)
                 ghostel-tmux--current-window-id nil)
           (ghostel-tmux--receive-window-rows
-           "@0\t%9\t1\tw\tb25d,80x24,0,0,5\tb25d,80x24,0,0,5" t)
+           "@0\t0\t%9\t1\tw\tb25d,80x24,0,0,5\tb25d,80x24,0,0,5" t)
           (should (eq shown tiled))
           (should-not ghostel-tmux--auto-host-window))))))
 
@@ -4540,8 +4545,8 @@ attach started; the attach is reported as done only then."
               (setq ghostel-tmux--auto-host-window (selected-window)
                     ghostel-tmux--session-id 1)
               (ghostel-tmux--receive-window-rows
-               (concat "@0\t%0\t0\ta\tb25d,80x24,0,0,0\t\n"
-                       "@1\t%1\t1\tb\t0000,\t")
+               (concat "@0\t0\t%0\t0\ta\tb25d,80x24,0,0,0\t\n"
+                       "@1\t1\t%1\t1\tb\t0000,\t")
                t))
             (should (equal sent '("select-window -t $1:@0")))
             (should ghostel-tmux--auto-host-window))
@@ -4581,7 +4586,7 @@ attach started; the attach is reported as done only then."
               (setq ghostel-tmux--auto-host-window (selected-window)
                     ghostel-tmux--current-window-id 7)
               (ghostel-tmux--receive-window-rows
-               "@0\t%0\t0\ta\tb25d,80x24,0,0,0\t"))
+               "@0\t0\t%0\t0\ta\tb25d,80x24,0,0,0\t"))
             (should-not sent)
             (should ghostel-tmux--auto-host-window))
         (kill-buffer pane)))))
@@ -4594,7 +4599,7 @@ attach started; the attach is reported as done only then."
       (let ((sent nil))
         (ghostel-tmux-test--with-sent ctl sent
           (setq ghostel-tmux--auto-host-window (selected-window))
-          (ghostel-tmux--receive-window-rows "@1\t%1\t1\tb\t0000,\t" t))
+          (ghostel-tmux--receive-window-rows "@1\t1\t%1\t1\tb\t0000,\t" t))
         (should-not sent)
         (should ghostel-tmux--auto-host-window)))))
 
@@ -4608,7 +4613,7 @@ attach started; the attach is reported as done only then."
           (set-window-buffer (selected-window) other)
           (with-current-buffer ctl
             (setq ghostel-tmux--auto-host-window (selected-window))
-            (ghostel-tmux--receive-window-rows "@1\t%1\t1\tb\t0000,\t" t)
+            (ghostel-tmux--receive-window-rows "@1\t1\t%1\t1\tb\t0000,\t" t)
             (should-not ghostel-tmux--auto-host-window)))))))
 
 (ert-deftest ghostel-tmux-test-rows-before-the-seed-move-no-session ()
@@ -4625,7 +4630,7 @@ attach started; the attach is reported as done only then."
             (ghostel-tmux-test--with-sent ctl sent
               (setq ghostel-tmux--auto-host-window (selected-window))
               (ghostel-tmux--receive-window-rows
-               "@0\t%0\t0\ta\tb25d,80x24,0,0,0\t"))
+               "@0\t0\t%0\t0\ta\tb25d,80x24,0,0,0\t"))
             (should-not sent)
             (should ghostel-tmux--auto-host-window))
         (kill-buffer pane)))))
@@ -4678,7 +4683,7 @@ attach started; the attach is reported as done only then."
             (setq ghostel-tmux--auto-host-window (selected-window)
                   ghostel-tmux--current-window-id 1)
             (ghostel-tmux--receive-window-rows
-             "@1\t%7\t1\tb\tb25d,80x24,0,0,1\t")
+             "@1\t1\t%7\t1\tb\tb25d,80x24,0,0,1\t")
             (should-not shown)
             (should ghostel-tmux--auto-host-window))
         (kill-buffer moving)
@@ -4943,8 +4948,8 @@ display-message -p %s\n"
         (ghostel-tmux--pump-deferred host)
         (should (= (length sent) 2))
         (ghostel-tmux-test--feed
-         host "%begin 4 4 1\r\n@1\t%1\t1\tw\tl\tl\r\n%end 4 4 1\r\n")
-        (should (equal rows '("@1\t%1\t1\tw\tl\tl")))))))
+         host "%begin 4 4 1\r\n@1\t1\t%1\t1\tw\tl\tl\r\n%end 4 4 1\r\n")
+        (should (equal rows '("@1\t1\t%1\t1\tw\tl\tl")))))))
 
 (ert-deftest ghostel-tmux-test-send-bytes-from-pane-chunks-large ()
   ;; A paste larger than `--send-keys-chunk-bytes' must be split into
@@ -6300,6 +6305,164 @@ tmux resizing a zoomed window reports it unzoomed on the way."
       (should (eql (get-text-property 1 'ghostel-tmux-window bar) 0))
       (should (eql (get-text-property 8 'ghostel-tmux-window bar) 1)))))
 
+(defmacro ghostel-tmux-test--with-hidden-window (ctl hidden &rest body)
+  "Run BODY in controller CTL with window @0 shown and window @1 not.
+HIDDEN is the buffer of pane %7, the only one of window @1."
+  (declare (indent 2))
+  (let ((sent (make-symbol "sent")))
+    `(ghostel-tmux-test--with-tile ,ctl '(5) "b25d,80x24,0,0,5" ,sent
+       (let ((,hidden (generate-new-buffer "*ghostel-tmux:s:logs%7*")))
+         (unwind-protect
+             (progn
+               (with-current-buffer ,hidden
+                 (setq-local ghostel-tmux--controller-buffer ,ctl
+                             ghostel-tmux--pane-id 7
+                             ghostel-tmux--window-id 1
+                             ghostel-tmux--initialized t))
+               (with-current-buffer (gethash 5 ghostel-tmux--panes)
+                 (setq-local ghostel-tmux--initialized t))
+               (puthash 7 ,hidden ghostel-tmux--panes)
+               (puthash 1 (list :name "logs" :index 3 :panes '(7))
+                        ghostel-tmux--windows)
+               (setq ghostel-tmux--window-order '(0 1))
+               ,@body)
+           (kill-buffer ,hidden))))))
+
+(defun ghostel-tmux-test--window-flags (wid)
+  "Return (ACTIVITY BELL) of tmux window WID."
+  (let ((entry (gethash wid ghostel-tmux--windows)))
+    (list (plist-get entry :activity) (plist-get entry :bell))))
+
+(ert-deftest ghostel-tmux-test-output-marks-a-window-not-shown ()
+  "Output marks the window of a pane no Emacs window shows, and only that."
+  (ghostel-tmux-test--with-hidden-window ctl hidden
+    (cl-letf (((symbol-function 'ghostel-write-output) #'ignore))
+      (ghostel-tmux--on-output 5 "a")
+      (ghostel-tmux--on-output 7 "a"))
+    (should (equal (ghostel-tmux-test--window-flags 0) '(nil nil)))
+    (should (equal (ghostel-tmux-test--window-flags 1) '(t nil)))))
+
+(ert-deftest ghostel-tmux-test-output-after-a-layout-change-marks-nothing ()
+  "Output right after a `%layout-change' is a repaint; rows change no layout."
+  (ghostel-tmux-test--with-hidden-window ctl hidden
+    (ghostel-tmux--receive-window-rows "@1\t3\t%7\t0\tlogs\tb25d,80x24,0,0,7\t")
+    (with-current-buffer hidden
+      (ghostel-tmux--mark-window :activity))
+    (should (equal (ghostel-tmux-test--window-flags 1) '(t nil)))
+    (ghostel-tmux--unmark-window 1)
+    (ghostel-tmux--dispatch-notification "%layout-change @1 b25d,80x24,0,0,7")
+    (with-current-buffer hidden
+      (ghostel-tmux--mark-window :activity))
+    (should (equal (ghostel-tmux-test--window-flags 1) '(nil nil)))
+    (with-current-buffer hidden
+      (ghostel-tmux--mark-window :bell))
+    (should (equal (ghostel-tmux-test--window-flags 1) '(nil t)))
+    (puthash 1 (plist-put (gethash 1 ghostel-tmux--windows) :laid-out 0)
+             ghostel-tmux--windows)
+    (with-current-buffer hidden
+      (ghostel-tmux--mark-window :activity))
+    (should (equal (ghostel-tmux-test--window-flags 1) '(t t)))))
+
+(ert-deftest ghostel-tmux-test-showing-a-window-drops-its-marks ()
+  "A window's marks go when one of its panes becomes a window's buffer."
+  (ghostel-tmux-test--with-hidden-window ctl hidden
+    (with-current-buffer hidden
+      (ghostel-tmux--mark-window :activity)
+      (ghostel-tmux--mark-window :bell))
+    (should (equal (ghostel-tmux-test--window-flags 1) '(t t)))
+    (cl-letf (((symbol-function 'ghostel-tmux--apply-pane-size) #'ignore))
+      (set-window-buffer (selected-window) hidden)
+      (with-current-buffer hidden
+        (ghostel-tmux--on-window-buffer-change (selected-window))))
+    (should (equal (ghostel-tmux-test--window-flags 1) '(nil nil)))))
+
+(ert-deftest ghostel-tmux-test-output-of-a-shown-pane-drops-stale-marks ()
+  "A mark that outlived its window being shown goes with the next output."
+  (ghostel-tmux-test--with-hidden-window ctl hidden
+    (puthash 0 (plist-put (gethash 0 ghostel-tmux--windows) :bell t)
+             ghostel-tmux--windows)
+    (with-current-buffer (gethash 5 ghostel-tmux--panes)
+      (ghostel-tmux--mark-window :activity))
+    (should (equal (ghostel-tmux-test--window-flags 0) '(nil nil)))))
+
+(ert-deftest ghostel-tmux-test-pane-mode-follows-bell-and-status ()
+  "A pane buffer has the bell and status hooks while it is a pane."
+  (ghostel-tmux-test--with-hidden-window ctl hidden
+    (with-current-buffer hidden
+      (ghostel-tmux-pane-mode 1)
+      (should (memq #'ghostel-tmux--pane-status-changed
+                    ghostel-program-status-functions))
+      (run-hooks 'ghostel-bell-functions)
+      (ghostel-tmux-pane-mode -1)
+      (should-not (memq #'ghostel-tmux--pane-bell ghostel-bell-functions))
+      (should-not (memq #'ghostel-tmux--pane-status-changed
+                        ghostel-program-status-functions)))
+    (should (equal (ghostel-tmux-test--window-flags 1) '(nil t)))))
+
+(ert-deftest ghostel-tmux-test-window-close-gives-the-indexes ()
+  "The windows left have the indexes of the reply."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--with-window-pane ctl pane
+          (puthash 2 (list :name "logs" :index 2) ghostel-tmux--windows)
+          (ghostel-tmux-test--feed ctl "%window-close @0\r\n")
+          (ghostel-tmux--pump-deferred ctl)
+          (ghostel-tmux-test--reply ctl "@2 1\r\n")
+          (should (eql (plist-get (gethash 2 ghostel-tmux--windows) :index) 1)))))))
+
+(ert-deftest ghostel-tmux-test-tab-has-the-face-of-its-mark ()
+  "A marked window's tab has the mark's face before the tab's; a bell wins."
+  (ghostel-tmux-test--with-hidden-window ctl hidden
+    (should (eq (get-text-property 1 'face (ghostel-tmux--window-tab 1 nil))
+                'tab-line-tab-inactive))
+    (with-current-buffer hidden
+      (ghostel-tmux--mark-window :activity))
+    (should (equal (get-text-property 1 'face (ghostel-tmux--window-tab 1 nil))
+                   '(ghostel-tmux-tab-activity tab-line-tab-inactive)))
+    (with-current-buffer hidden
+      (ghostel-tmux--mark-window :bell))
+    (should (equal (get-text-property 1 'face (ghostel-tmux--window-tab 1 nil))
+                   '(ghostel-tmux-tab-bell tab-line-tab-inactive)))))
+
+(ert-deftest ghostel-tmux-test-tab-shows-the-program-status-of-its-panes ()
+  "A tab has the status label of its panes, for the indicator's states."
+  (ghostel-tmux-test--with-hidden-window ctl hidden
+    (let ((ghostel-status-mode-line-labels 'words)
+          (ghostel-status-indicator-states '(blocked done)))
+      (with-current-buffer hidden
+        (setq-local ghostel-program-status '(("" :state working))))
+      (should (equal (substring-no-properties (ghostel-tmux--window-tab 1 nil))
+                     " logs "))
+      (with-current-buffer hidden
+        (setq-local ghostel-program-status '(("" :state blocked))))
+      (let ((tab (ghostel-tmux--window-tab 1 nil)))
+        (should (equal (substring-no-properties tab) " logs [blocked] "))
+        (should (eq (car (last (get-text-property 7 'face tab)))
+                    'tab-line-tab-inactive))))))
+
+(ert-deftest ghostel-tmux-test-tab-name-function-gets-the-window ()
+  "`ghostel-tmux-tab-name-function' gives the tab's text from the window."
+  (ghostel-tmux-test--with-hidden-window ctl hidden
+    (with-current-buffer hidden
+      (ghostel-tmux--mark-window :bell))
+    (let* ((seen nil)
+           (ghostel-tmux-tab-name-function
+            (lambda (window)
+              (setq seen window)
+              (format "%d:%s" (plist-get window :index) (plist-get window :name)))))
+      (should (equal (substring-no-properties (ghostel-tmux--window-tab 1 nil))
+                     " 3:logs "))
+      (should (equal seen '(:id 1 :name "logs" :index 3 :activity nil :bell t
+                                :status nil))))))
+
+(ert-deftest ghostel-tmux-test-window-rows-give-the-index ()
+  "A row's `#{window_index}' is kept with the window."
+  (ghostel-tmux-test--with-controller ctl
+    (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change) #'ignore))
+      (ghostel-tmux--receive-window-rows "@4\t2\t%0\t1\tw\tl\tv\n"))
+    (should (eql (plist-get (gethash 4 ghostel-tmux--windows) :index) 2))))
+
 (ert-deftest ghostel-tmux-test-tab-line-is-one-bar-over-a-tile ()
   "The windows of a tile's top row show their parts of one bar."
   (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
@@ -6694,7 +6857,7 @@ BODY starts with no held calls and its own `minibuffer-exit-hook'."
           (unwind-protect
               (progn
                 (ghostel-tmux--receive-window-rows
-                 "@0\t%6\t1\tw\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6" t)
+                 "@0\t0\t%6\t1\tw\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6" t)
                 (should (memq #'ghostel-tmux--schedule-held-calls minibuffer-exit-hook))
                 (should-not shown)
                 (setq open nil)
@@ -6741,7 +6904,7 @@ BODY starts with no held calls and its own `minibuffer-exit-hook'."
           (unwind-protect
               (save-window-excursion
                 (ghostel-tmux--receive-window-rows
-                 "@0\t%6\t1\tw\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6" t)
+                 "@0\t0\t%6\t1\tw\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6" t)
                 (set-window-buffer (selected-window) other)
                 (setq open nil)
                 (ghostel-tmux--run-held-calls)
@@ -6768,8 +6931,8 @@ BODY starts with no held calls and its own `minibuffer-exit-hook'."
                 (setq ghostel-tmux--auto-host-window (selected-window)
                       ghostel-tmux--session-id 1)
                 (ghostel-tmux--receive-window-rows
-                 (concat "@0\t%0\t0\ta\tb25d,80x24,0,0,0\t\n"
-                         "@1\t%1\t1\tb\t0000,\t")
+                 (concat "@0\t0\t%0\t0\ta\tb25d,80x24,0,0,0\t\n"
+                         "@1\t1\t%1\t1\tb\t0000,\t")
                  t)
                 (should-not sent)
                 (setq open nil)
@@ -7098,8 +7261,8 @@ BODY starts with no held calls and its own `minibuffer-exit-hook'."
           (ghostel-tmux-test--reply ctl "host 42 1700000000\r\n")
           (should (equal ghostel-tmux--server-key "host 42 1700000000"))
           (should-not rows)
-          (ghostel-tmux-test--reply ctl "@0\t%0\t1\tw\tl\tv\r\n")
-          (should (equal rows '("@0\t%0\t1\tw\tl\tv" t)))
+          (ghostel-tmux-test--reply ctl "@0\t0\t%0\t1\tw\tl\tv\r\n")
+          (should (equal rows '("@0\t0\t%0\t1\tw\tl\tv" t)))
           (should (= (length sent) 1)))))))
 
 (ert-deftest ghostel-tmux-test-blank-server-key-is-none ()
@@ -7164,7 +7327,7 @@ buffer it is given."
             (unwind-protect
                 (progn
                   (ghostel-tmux--receive-window-rows
-                   "@0\t%6\t1\tw\taaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}\taaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}"
+                   "@0\t0\t%6\t1\tw\taaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}\taaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}"
                    t)
                   (should (eq (gethash 5 ghostel-tmux--panes) old))
                   (should (eq (window-buffer (selected-window)) old))
@@ -7190,7 +7353,7 @@ buffer it is given."
             (unwind-protect
                 (progn
                   (ghostel-tmux--receive-window-rows
-                   "@0\t%6\t1\tw\taaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}\taaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}"
+                   "@0\t0\t%6\t1\tw\taaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}\taaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}"
                    t)
                   (should (eq shown old))
                   (should-not ghostel-tmux--auto-host-window))
@@ -7212,7 +7375,7 @@ buffer it is given."
         (unwind-protect
             (progn
               (ghostel-tmux--receive-window-rows
-               "@0\t%6\t1\tw\taaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}\taaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}"
+               "@0\t0\t%6\t1\tw\taaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}\taaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}"
                t)
               (should (eq shown (gethash 6 ghostel-tmux--panes)))
               (should (eql ghostel-tmux--active-pane-id 6))
@@ -7475,7 +7638,7 @@ PANES is a list of two variables, bound to the buffers of %5 in window
                ctl (concat "%sessions-changed\r\n%window-add @1\r\n"
                            "%extended-output %5 0 : hi\r\n"
                            "%begin 1 1 1\r\n"
-                           "@1\t%6\t1\tb\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6\r\n"
+                           "@1\t1\t%6\t1\tb\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6\r\n"
                            "%end 1 1 1\r\n"
                            "%sessions-changed\r\n"))
               (should (eq (current-buffer) ctl))
@@ -7531,7 +7694,7 @@ PANES is a list of two variables, bound to the buffers of %5 in window
           (should-not sessions)
           (ghostel-tmux-test--feed
            ctl (concat "%begin 1 1 1\r\n"
-                       "@7\t%9\t1\tw\tb25d,80x24,0,0,9\tb25d,80x24,0,0,9\r\n"
+                       "@7\t7\t%9\t1\tw\tb25d,80x24,0,0,9\tb25d,80x24,0,0,9\r\n"
                        "%end 1 1 1\r\n"))
           (should (equal sessions '("other")))
           (should (equal (ghostel-tmux-session-id) "$4")))))))
@@ -7798,7 +7961,7 @@ PANES is a list of two variables, bound to the buffers of %5 in window
             (list (lambda ()
                     (push (list (current-buffer) (ghostel-tmux-active-pane))
                           runs))))
-           (rows "@1\t%6\t1\tb\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6"))
+           (rows "@1\t1\t%6\t1\tb\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6"))
       (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change) #'ignore))
         (ghostel-tmux--receive-window-rows rows)
         (should-not runs)
@@ -7810,7 +7973,7 @@ PANES is a list of two variables, bound to the buffers of %5 in window
   (ghostel-tmux-test--with-session ctl (five six)
     (let* ((order nil)
            (ghostel-tmux-attach-hook (list (lambda () (push 'hook order))))
-           (rows "@1\t%6\t1\tb\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6"))
+           (rows "@1\t1\t%6\t1\tb\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6"))
       (ghostel-tmux-test--with-minibuffer open
         (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change) #'ignore)
                   ((symbol-function 'ghostel-tmux--display-pane-in-window)
@@ -7848,7 +8011,7 @@ PANES is a list of two variables, bound to the buffers of %5 in window
             (should-not ghostel-tmux--auto-host-window)
             (should-not ghostel-tmux--auto-host-buffer)
             (ghostel-tmux--receive-window-rows
-             "@0\t%6\t1\tw\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6" t)
+             "@0\t0\t%6\t1\tw\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6" t)
             (should-not shown)
             (should (= runs 1))
             ;; Attached already: the rows are asked for, for the hook.

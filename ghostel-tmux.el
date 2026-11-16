@@ -142,6 +142,31 @@ or nil) and PANE-ID (integer).  Must return a string."
   :type 'function
   :group 'ghostel-tmux)
 
+(defcustom ghostel-tmux-tab-name-function #'ghostel-tmux--default-tab-name
+  "Function returning the text of a tmux window's tab.
+Called in the session's controller buffer with a plist:
+
+`:id'        The window's id, an integer.
+`:name'      Its name.
+`:index'     Its index as tmux last listed it, or nil before that; a
+             `swap-window' or `move-window' is not reported.
+`:activity'  Non-nil after output that no Emacs window showed.
+`:bell'      Non-nil after a bell that no Emacs window showed.
+`:status'    The label of its panes' program status in one of
+             `ghostel-status-indicator-states', or nil.
+
+Faces in the text go before the tab's own."
+  :type 'function
+  :group 'ghostel-tmux)
+
+(defface ghostel-tmux-tab-activity '((t :inherit tab-line-tab-modified))
+  "Face for the tab of a tmux window with output no Emacs window showed."
+  :group 'ghostel-tmux)
+
+(defface ghostel-tmux-tab-bell '((t :inherit warning))
+  "Face for the tab of a tmux window whose bell rang while not shown."
+  :group 'ghostel-tmux)
+
 
 ;; Hooks
 
@@ -213,8 +238,10 @@ matching `%end' arrives; or with nil when an `%error' is received.")
 
 (defvar-local ghostel-tmux--windows nil
   "Hash table mapping integer window-id to a plist.
-Its keys are :name, :panes, :active-pane (tmux's active pane of that
-window), :zooming (see `ghostel-tmux--ensure-pane-zoomed'), :zoomed (as
+Its keys are :name, :index, :panes, :active-pane (tmux's active pane of
+that window), :activity, :bell and :laid-out, the time of its last
+`%layout-change' (see `ghostel-tmux--mark-window'),
+:zooming (see `ghostel-tmux--ensure-pane-zoomed'), :zoomed (as
 `%layout-change' last said), :tree (the visible layout, see
 `ghostel-tmux--parse-layout-tree'), :settling (see
 `ghostel-tmux--settle-layout'), :tile-tree and :tiled, the layout and
@@ -723,11 +750,12 @@ auto-takeover host; pane buffers are sealed read-only or killed, see
      ;; printable flags, producing a trailing space we must tolerate.
      "\\`%layout-change @\\([0-9]+\\) \\([^ ]+\\)\\(?: \\([^ ]*\\)\\)?\\(?: \\([^ ]*\\)\\)?\\(?: [^ ]*\\)? *\\'"
      line)
-    (ghostel-tmux--on-layout-change
-     (string-to-number (match-string 1 line))
-     (match-string 2 line)
-     (match-string 3 line)
-     (match-string 4 line)))
+    (let ((wid (string-to-number (match-string 1 line))))
+      (ghostel-tmux--on-layout-change
+       wid (match-string 2 line) (match-string 3 line) (match-string 4 line))
+      (puthash wid (plist-put (gethash wid ghostel-tmux--windows)
+                              :laid-out (float-time))
+               ghostel-tmux--windows)))
    ((string-match "\\`%exit\\(?: \\(.*\\)\\)?\\'" line)
     (ghostel-tmux--on-exit (match-string 1 line)))
    ;; Anything else, such as `%sessions-changed', needs no action.
@@ -980,7 +1008,51 @@ the capture snapshot."
             ;; tmux answers the program's queries; a reply sent with
             ;; `send-keys' would arrive after the program asking has
             ;; usually exited, in the next prompt as if typed.
-            (ghostel-write-output decoded t)))))))
+            (ghostel-write-output decoded t)
+            (ghostel-tmux--mark-window :activity)))))))
+
+(defun ghostel-tmux--mark-window (flag)
+  "Set FLAG, :activity or :bell, on this pane's tmux window.
+Not while an Emacs window shows a pane of it, which drops its marks.
+Output within a second of a `%layout-change' is no activity: tmux
+resizes every window of the session with the client."
+  (let ((controller ghostel-tmux--controller-buffer)
+        (wid ghostel-tmux--window-id)
+        (shown (get-buffer-window (current-buffer) 'visible)))
+    (when (buffer-live-p controller)
+      (with-current-buffer controller
+        (let ((entry (gethash wid ghostel-tmux--windows)))
+          (cond
+           ((null entry))
+           ;; A floating pane is not among the window's panes.
+           ((or shown
+                (cl-some (lambda (pid)
+                           (when-let* ((buf (gethash pid ghostel-tmux--panes)))
+                             (get-buffer-window buf 'visible)))
+                         (plist-get entry :panes)))
+            (ghostel-tmux--unmark-window wid))
+           ((plist-get entry flag))
+           ((and (eq flag :activity)
+                 (< (- (float-time) (or (plist-get entry :laid-out) 0)) 1.0)))
+           (t
+            (puthash wid (plist-put entry flag t) ghostel-tmux--windows)
+            (ghostel-tmux--refresh-tab-line))))))))
+
+(defun ghostel-tmux--unmark-window (wid)
+  "Drop the :activity and :bell marks of tmux window WID."
+  (let ((entry (gethash wid ghostel-tmux--windows)))
+    (when (or (plist-get entry :activity) (plist-get entry :bell))
+      (setq entry (plist-put entry :activity nil))
+      (puthash wid (plist-put entry :bell nil) ghostel-tmux--windows)
+      (ghostel-tmux--refresh-tab-line))))
+
+(defun ghostel-tmux--pane-bell ()
+  "Mark this pane's tmux window as having rung its bell."
+  (ghostel-tmux--mark-window :bell))
+
+(defun ghostel-tmux--pane-status-changed (&rest _)
+  "Show this pane's program status in the tabs of its session."
+  (force-mode-line-update t))
 
 (defun ghostel-tmux--pane-window ()
   "Return a visible window showing a pane of this controller, or nil.
@@ -997,7 +1069,7 @@ The selected window comes first."
     window))
 
 (defconst ghostel-tmux--window-rows-command
-  "list-windows -F \"#{window_id}\\t#{pane_id}\\t#{window_active}\\t#{window_name}\\t#{window_layout}\\t#{window_visible_layout}\""
+  "list-windows -F \"#{window_id}\\t#{window_index}\\t#{pane_id}\\t#{window_active}\\t#{window_name}\\t#{window_layout}\\t#{window_visible_layout}\""
   "The `list-windows' command whose rows `--receive-window-rows' parses.")
 
 (defun ghostel-tmux--on-session-changed (sid name)
@@ -1075,14 +1147,26 @@ SEED is passed on to `ghostel-tmux--receive-window-rows'."
 (defun ghostel-tmux--on-window-close (wid)
   "Handle `%window-close @WID': drop the window if the session lost it.
 tmux also sends this when another session, such as a grouped one, lets go of a
-window this session keeps, so ask.  A session that ends sends `%exit' instead."
+window this session keeps, so ask.  The reply also has the indexes, which
+`renumber-windows' changes.  A session that ends sends `%exit' instead."
   (when (gethash wid ghostel-tmux--windows)
     (ghostel-tmux--queue-command
-     "list-windows -F \"#{window_id}\""
+     "list-windows -F \"#{window_id} #{window_index}\""
      (lambda (output)
-       (when (and output
-                  (not (member (format "@%d" wid) (split-string output))))
-         (ghostel-tmux--drop-window wid))))))
+       (when output
+         (let (listed)
+           (dolist (line (split-string output "\n" t))
+             (when (string-match "\\`@\\([0-9]+\\) \\([0-9]+\\)" line)
+               (let* ((id (string-to-number (match-string 1 line)))
+                      (entry (gethash id ghostel-tmux--windows)))
+                 (push id listed)
+                 (when entry
+                   (puthash id (plist-put entry :index
+                                          (string-to-number (match-string 2 line)))
+                            ghostel-tmux--windows)))))
+           (if (memq wid listed)
+               (ghostel-tmux--refresh-tab-line)
+             (ghostel-tmux--drop-window wid))))))))
 
 (defun ghostel-tmux--drop-window (wid)
   "Forget window WID and kill its pane buffers.  Its tile collapses."
@@ -1445,17 +1529,18 @@ joins or leaves it, while the pane shown keeps the size of its Emacs window."
 
 (defun ghostel-tmux--parse-window-row (line)
   "Parse `list-windows' LINE, or return nil for any other line.
-The result is (WID ACTIVE-PANE CURRENT NAME LAYOUT VISIBLE-LAYOUT).
+The result is (WID ACTIVE-PANE CURRENT NAME LAYOUT VISIBLE-LAYOUT INDEX).
 A client without UTF-8, such as `tmux -CC' typed in a C locale, gets
 every tab and non-ASCII character of the row as `_'."
   (when (string-match
-         "\\`@\\([0-9]+\\)[\t_]%\\([0-9]+\\)[\t_]\\([01]\\)[\t_]\\(.*\\)[\t_]\\(.+\\)[\t_]\\(.*\\)\\'" line)
+         "\\`@\\([0-9]+\\)[\t_]\\([0-9]+\\)[\t_]%\\([0-9]+\\)[\t_]\\([01]\\)[\t_]\\(.*\\)[\t_]\\(.+\\)[\t_]\\(.*\\)\\'" line)
     (list (string-to-number (match-string 1 line))
-          (string-to-number (match-string 2 line))
-          (equal (match-string 3 line) "1")
-          (ghostel-tmux--decode-text (match-string 4 line))
-          (match-string 5 line)
-          (match-string 6 line))))
+          (string-to-number (match-string 3 line))
+          (equal (match-string 4 line) "1")
+          (ghostel-tmux--decode-text (match-string 5 line))
+          (match-string 6 line)
+          (match-string 7 line)
+          (string-to-number (match-string 2 line)))))
 
 (defun ghostel-tmux--run-hook (hook &rest args)
   "Run HOOK with ARGS; an error of one of its functions is reported.
@@ -1481,8 +1566,8 @@ Waits for the minibuffer to close, see `ghostel-tmux--hold'."
 
 (defun ghostel-tmux--receive-window-rows (output &optional seed)
   "Parse `list-windows' OUTPUT and create/update windows + panes.
-Each row is `@WID<TAB>%ACTIVE-PANE<TAB>CURRENT<TAB>WINDOW-NAME<TAB>LAYOUT
-<TAB>VISIBLE-LAYOUT': window names contain spaces.
+Each row is `@WID<TAB>INDEX<TAB>%ACTIVE-PANE<TAB>CURRENT<TAB>WINDOW-NAME
+<TAB>LAYOUT<TAB>VISIBLE-LAYOUT': window names contain spaces.
 With SEED, for the reply about the session itself, the rows also give
 the session's current window, before any pane is created, and its active pane,
 once all are: a sealed pane made live again can be shown already, and its window
@@ -1502,9 +1587,10 @@ Later changes arrive as notifications."
               active-pane (cadr row))))
     (when kept
       (setq ghostel-tmux--auto-host-window nil))
-    (pcase-dolist (`(,wid ,active ,_current ,name ,layout ,visible) rows)
+    (pcase-dolist (`(,wid ,active ,_current ,name ,layout ,visible ,index) rows)
       (let ((entry (plist-put (gethash wid ghostel-tmux--windows)
                               :name name)))
+        (setq entry (plist-put entry :index index))
         (puthash wid (plist-put entry :active-pane active)
                  ghostel-tmux--windows))
       (ghostel-tmux--on-layout-change wid layout visible))
@@ -2187,6 +2273,9 @@ inert so a TUI program inside the pane receives the keystroke raw."
     (tab-line-mode 1)
     (setq tab-line-format '(:eval (ghostel-tmux--tab-line)))
     (add-hook 'kill-buffer-hook #'ghostel-tmux--pane-killed nil t)
+    (add-hook 'ghostel-bell-functions #'ghostel-tmux--pane-bell nil t)
+    (add-hook 'ghostel-program-status-functions
+              #'ghostel-tmux--pane-status-changed t t)
     ;; tab-line click and any other plain `switch-to-buffer' path
     ;; won't go through `--display-pane-in-window'; this hook makes
     ;; sure the pane terminal is sized whenever its buffer becomes a
@@ -2196,6 +2285,9 @@ inert so a TUI program inside the pane receives the keystroke raw."
    (t
     (ghostel-tmux--drop-tab-line)
     (remove-hook 'kill-buffer-hook #'ghostel-tmux--pane-killed t)
+    (remove-hook 'ghostel-bell-functions #'ghostel-tmux--pane-bell t)
+    (remove-hook 'ghostel-program-status-functions
+                 #'ghostel-tmux--pane-status-changed t)
     (remove-hook 'window-buffer-change-functions
                  #'ghostel-tmux--on-window-buffer-change t))))
 
@@ -2206,13 +2298,9 @@ inert so a TUI program inside the pane receives the keystroke raw."
   (kill-local-variable 'tab-line-tabs-function))
 
 (defun ghostel-tmux--refresh-tab-line ()
-  "Refresh `tab-line-mode' display in every pane buffer of this controller."
+  "Redraw the tab lines, when this controller has panes."
   (when ghostel-tmux--panes
-    (maphash (lambda (_pid buf)
-               (when (buffer-live-p buf)
-                 (with-current-buffer buf
-                   (force-mode-line-update t))))
-             ghostel-tmux--panes)))
+    (force-mode-line-update t)))
 
 (define-derived-mode ghostel-tmux-control-mode special-mode "Ghostel-tmux-ctl"
   "Hidden buffer hosting the `tmux -C' subprocess."
@@ -3216,21 +3304,52 @@ Return the windows that remain of them."
     map)
   "Keymap of the tab of a tmux window.")
 
+(defun ghostel-tmux--default-tab-name (window)
+  "Return the name of WINDOW and the status of its programs.
+WINDOW is the plist of `ghostel-tmux-tab-name-function'."
+  (concat (plist-get window :name) (plist-get window :status)))
+
+(defun ghostel-tmux--window-status (entry)
+  "Return the program status label of the panes of the window ENTRY, or nil."
+  (ghostel-status-label
+   (cl-remove-if-not
+    (lambda (record)
+      (memq (plist-get (cdr record) :state) ghostel-status-indicator-states))
+    (apply #'append
+           (mapcar (lambda (pid)
+                     (let ((buf (gethash pid ghostel-tmux--panes)))
+                       (and (buffer-live-p buf)
+                            (buffer-local-value 'ghostel-program-status buf))))
+                   (plist-get entry :panes))))))
+
+(defun ghostel-tmux--window-tab (wid current)
+  "Return the tab of tmux window WID, the one shown when CURRENT."
+  (let* ((entry (gethash wid ghostel-tmux--windows))
+         (tab (concat " "
+                      (funcall ghostel-tmux-tab-name-function
+                               (list :id wid
+                                     :name (or (plist-get entry :name) "")
+                                     :index (plist-get entry :index)
+                                     :activity (plist-get entry :activity)
+                                     :bell (plist-get entry :bell)
+                                     :status (ghostel-tmux--window-status entry)))
+                      " ")))
+    (dolist (face (list (cond ((plist-get entry :bell) 'ghostel-tmux-tab-bell)
+                              ((plist-get entry :activity) 'ghostel-tmux-tab-activity))
+                        (if current 'tab-line-tab-current 'tab-line-tab-inactive)))
+      (when face
+        (add-face-text-property 0 (length tab) face t tab)))
+    (propertize tab
+                'mouse-face 'tab-line-highlight
+                'keymap ghostel-tmux--window-tab-map
+                'help-echo "mouse-1: show this tmux window"
+                'ghostel-tmux-window wid)))
+
 (defun ghostel-tmux--window-tabs (wid width)
   "Return the tabs of this controller's tmux windows, WID's current.
 The bar is padded to WIDTH columns."
   (let* ((tabs (mapconcat
-                (lambda (w)
-                  (propertize (concat " " (or (plist-get (gethash w ghostel-tmux--windows)
-                                                         :name)
-                                              "")
-                                      " ")
-                              'face (if (eql w wid) 'tab-line-tab-current
-                                      'tab-line-tab-inactive)
-                              'mouse-face 'tab-line-highlight
-                              'keymap ghostel-tmux--window-tab-map
-                              'help-echo "mouse-1: show this tmux window"
-                              'ghostel-tmux-window w))
+                (lambda (w) (ghostel-tmux--window-tab w (eql w wid)))
                 ghostel-tmux--window-order
                 (propertize " " 'face 'tab-line)))
          (pad (- width (string-width tabs))))
@@ -3999,6 +4118,7 @@ of the pane's own tmux window, nothing is shown: the tile shows its panes."
 
 (defun ghostel-tmux--on-window-buffer-change (window)
   "Resize the pane terminal when this buffer becomes WINDOW's content.
+Its tmux window loses its marks.
 Hook for `window-buffer-change-functions': covers tab-line clicks and
 any other path that swaps the buffer into a window without going through
 `ghostel-tmux--display-pane-in-window'.  From Emacs 31 the hook runs in its
@@ -4006,10 +4126,13 @@ buffer, also for the buffer WINDOW lost; before, in whatever buffer is current."
   (when (and (window-live-p window)
              (or (< emacs-major-version 31)
                  (eq (window-buffer window) (current-buffer))))
-    (let ((pane (window-buffer window)))
-      (when (buffer-live-p (buffer-local-value
-                            'ghostel-tmux--controller-buffer pane))
-        (ghostel-tmux--apply-pane-size pane window t)))))
+    (let* ((pane (window-buffer window))
+           (controller (buffer-local-value 'ghostel-tmux--controller-buffer pane))
+           (wid (buffer-local-value 'ghostel-tmux--window-id pane)))
+      (when (buffer-live-p controller)
+        (ghostel-tmux--apply-pane-size pane window t)
+        (with-current-buffer controller
+          (ghostel-tmux--unmark-window wid))))))
 
 (defun ghostel-tmux--attach-pane ()
   "Return the buffer of tmux's active pane, or the one standing in for it.

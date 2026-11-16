@@ -212,8 +212,32 @@ hit =C-t n= / =C-t p=.  A split has one tab line over its top row of windows,
 each showing its part, and no tab line further down.  =C-t C-n= / =C-t C-p=
 and =C-t w= go to a pane of any window.
 
-With =ghostel-tmux-split-windows= nil, the tabs are the session's panes, and a
-click switches panes in the same window.
+A tab has the face =ghostel-tmux-tab-activity= when its window printed
+something while no Emacs window showed it, and =ghostel-tmux-tab-bell= when
+its bell rang; both go when you show the window.  What a program prints in
+the second after its window's layout changed does not count, as programs
+repaint then.  A tab also shows the status its programs report (OSC 7501,
+OSC 9;4 progress), as ghostel's mode line does, for the states in
+=ghostel-status-indicator-states=.
+
+=ghostel-tmux-tab-name-function= returns a tab's text.  It gets a plist with
+the window's =:id=, =:name=, =:index=, =:activity=, =:bell= and =:status=;
+to show tabs as tmux's status line does:
+
+#+begin_src emacs-lisp
+(setq ghostel-tmux-tab-name-function
+      (lambda (window)
+        (format "%s:%s%s%s"
+                (plist-get window :index)
+                (plist-get window :name)
+                (cond ((plist-get window :bell) "!")
+                      ((plist-get window :activity) "#")
+                      (t ""))
+                (or (plist-get window :status) ""))))
+#+end_src
+
+With =ghostel-tmux-split-windows= nil, the tabs are the session's panes, without
+marks or status, and a click switches panes in the same window.
 
 * Sizing
 
@@ -323,6 +347,7 @@ window when tmux changes the panes.
 | =ghostel-tmux-history-lines=          | Scrollback lines to backfill via =capture-pane= on attach.  Default =10000=.          |
 | =ghostel-tmux-default-rows= / =-cols=   | Initial pane terminal size before the layout-resize fires.  Default =40= x =120=.     |
 | =ghostel-tmux-buffer-name-function=   | Customize pane buffer naming.  Called with =(SESSION WINDOW PANE-ID)=.               |
+| =ghostel-tmux-tab-name-function=      | The text of a tmux window's tab, see [[*Tab line][Tab line]].                                        |
 
 * Development
 
