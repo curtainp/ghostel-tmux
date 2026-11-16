@@ -1235,17 +1235,19 @@ active, see `ghostel-tmux--hold'."
 
 (defun ghostel-tmux--select-tile-window (windows pid)
   "Select the window of pane PID among the tile WINDOWS, which shows it.
-Only when the selected window is one of them: a report from tmux must
-not take the selection from another window or the minibuffer.  With the
-minibuffer selected, the pane tmux has active then is followed when it
-has closed, see `ghostel-tmux--hold'.  Runs in the controller."
+Only when the selected window is one of them and shows a pane of
+theirs: a report from tmux must not take the selection from another
+buffer, another window or the minibuffer.  With the minibuffer
+selected, the pane tmux has active then is followed when it has closed,
+see `ghostel-tmux--hold'.  Runs in the controller."
   (when-let* ((buf (gethash pid ghostel-tmux--panes))
               (window (cl-find-if (lambda (w)
                                     (and (eql (ghostel-tmux--tile-pid w) pid)
                                          (eq (window-buffer w) buf)))
                                   windows)))
     (cond
-     ((memq (selected-window) windows)
+     ((and (memq (selected-window) windows)
+           (ghostel-tmux--tile-shown-pane (selected-window)))
       (unless (eq window (selected-window))
         (save-current-buffer
           (select-window window))))
@@ -2314,6 +2316,14 @@ A tile of a killed controller is none."
   "Return the pane id of WINDOW's tile parameter, or nil."
   (nth 2 (window-parameter window 'ghostel-tmux-tile)))
 
+(defun ghostel-tmux--tile-shown-pane (window)
+  "Return the id of the pane WINDOW shows, when of its tile's tmux window."
+  (let ((tile (window-parameter window 'ghostel-tmux-tile))
+        (buf (window-buffer window)))
+    (and (eq (buffer-local-value 'ghostel-tmux--controller-buffer buf) (nth 0 tile))
+         (eql (buffer-local-value 'ghostel-tmux--window-id buf) (nth 1 tile))
+         (buffer-local-value 'ghostel-tmux--pane-id buf))))
+
 (defun ghostel-tmux--tiles ()
   "Return the windows of all tiles, as ((CONTROLLER . WID) . WINDOWS).
 The windows of each come top left first."
@@ -2645,6 +2655,18 @@ tile, and is selected when one of WINDOWS was.  Return KEEP."
           (select-window keep)))
       keep)))
 
+(defun ghostel-tmux--tile-lone-window (wid windows)
+  "Settle the tile WINDOWS of tmux window WID left with one window of several.
+The pane it shows is zoomed; a window that shows another buffer leaves
+the tile instead.  Return non-nil for such a tile.  Runs in the
+controller."
+  (when (and (null (cdr windows))
+             (cdr (plist-get (gethash wid ghostel-tmux--windows) :tiled)))
+    (if-let* ((pid (ghostel-tmux--tile-shown-pane (car windows))))
+        (ghostel-tmux--ensure-pane-zoomed wid pid)
+      (ghostel-tmux--leave-tile (car windows)))
+    t))
+
 (defun ghostel-tmux--tile-pids (windows)
   "Return the sorted pane ids of the tile WINDOWS."
   (sort (mapcar #'ghostel-tmux--tile-pid windows)
@@ -2797,8 +2819,11 @@ failure TRIES times."
   "Show tmux window WID as its layout says, in its tile or a window of it.
 Runs in the controller.  A tile of another shape is built again in its
 space, kept for a lost pane in `ghostel-tmux--auto-host-window' when it
-is part of it.  Without a tile, a window showing a pane of a WID of several
-panes gets one.  Waits for the minibuffer to close, see `ghostel-tmux--hold'."
+is part of it.  One left with a single window is settled as by
+`ghostel-tmux--tile-lone-window', unless that window shows a pane and
+the layout is of another shape.  Without a tile, a window showing a
+pane of a WID of several panes gets one.  Waits for the minibuffer to
+close, see `ghostel-tmux--hold'."
   (let* ((controller (current-buffer))
          (entry (gethash wid ghostel-tmux--windows))
          (tree (plist-get entry :tree))
@@ -2818,6 +2843,14 @@ panes gets one.  Waits for the minibuffer to close, see `ghostel-tmux--hold'."
         (ghostel-tmux--tile-fit tree (ghostel-tmux--tile-placed windows))
         (ghostel-tmux--note-tile-size wid windows)
         (ghostel-tmux--tile-sync-size wid)))
+     ;; One window left of several, which `--tile-check' has not seen
+     ;; yet.  A window showing a pane gets a layout of another shape.
+     ((and windows (null (cdr windows))
+           (not (and (ghostel-tmux--tile-shown-pane (car windows))
+                     (not (equal (ghostel-tmux--layout-shape tree)
+                                 (ghostel-tmux--layout-shape
+                                  (plist-get entry :tile-tree))))))
+           (ghostel-tmux--tile-lone-window wid windows)))
      (windows
       (ghostel-tmux--tile-build wid (ghostel-tmux--tile-collapse windows keep))
       (ghostel-tmux--tile-sync-size wid))
@@ -2995,11 +3028,7 @@ the minibuffer to close, see `ghostel-tmux--hold'."
      ((not (ghostel-tmux--tile-intact-p wid windows))
       (cond
        (settling)
-       ((and (null (cdr windows)) (cdr (plist-get entry :tiled)))
-        (let ((pid (ghostel-tmux--tile-pid (car windows))))
-          (if (eq (window-buffer (car windows)) (gethash pid ghostel-tmux--panes))
-              (ghostel-tmux--ensure-pane-zoomed wid pid)
-            (ghostel-tmux--leave-tile (car windows)))))
+       ((ghostel-tmux--tile-lone-window wid windows))
        (t
         (ghostel-tmux--tile-build wid (ghostel-tmux--tile-collapse windows))
         (ghostel-tmux--tile-sync-size wid))))

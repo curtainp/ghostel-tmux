@@ -5719,6 +5719,75 @@ collects the lines sent, newest first.  The panes are plain buffers."
     (should-not (ghostel-tmux--tile-windows ctl 0))
     (should (= (length (window-list nil 'no-mini)) 1))))
 
+(ert-deftest ghostel-tmux-test-tile-update-frees-a-lone-window-of-another-buffer ()
+  "A layout leaves the last window of a tile to the other buffer it shows."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0))
+          (scratch (get-buffer-create "*scratch*")))
+      (set-window-buffer (car windows) scratch)
+      (delete-window (cadr windows))
+      (ghostel-tmux--tile-update 0)
+      (should-not (ghostel-tmux--tile-windows ctl 0))
+      (should (equal (window-list nil 'no-mini) (list (car windows))))
+      (should (eq (window-buffer (car windows)) scratch)))))
+
+(ert-deftest ghostel-tmux-test-tile-update-of-another-shape-frees-a-lone-window ()
+  "A layout of another shape leaves the last window to its other buffer too."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0))
+          (scratch (get-buffer-create "*scratch*")))
+      (set-window-buffer (car windows) scratch)
+      (delete-window (cadr windows))
+      (puthash 0 (plist-put (gethash 0 ghostel-tmux--windows) :tree
+                            (ghostel-tmux--parse-layout-tree
+                             "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0[39x11,40,0,6,39x11,40,12,7]}"))
+               ghostel-tmux--windows)
+      (ghostel-tmux--tile-update 0)
+      (should-not (ghostel-tmux--tile-windows ctl 0))
+      (should (equal (window-list nil 'no-mini) (list (car windows))))
+      (should (eq (window-buffer (car windows)) scratch)))))
+
+(ert-deftest ghostel-tmux-test-tile-update-zooms-a-lone-window ()
+  "A layout of the same shape zooms the pane of a tile's last window."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (delete-window (car (ghostel-tmux--tile-windows ctl 0)))
+    (set-buffer ctl)
+    (setq sent nil)
+    (ghostel-tmux--tile-update 0)
+    (should (equal (ghostel-tmux-test--tile-pids ctl) '(6)))
+    (should (= (length (window-list nil 'no-mini)) 1))
+    (should (equal (car sent) "display-message -p -t %6 '#{window_zoomed_flag}'\n"))))
+
+(ert-deftest ghostel-tmux-test-tile-update-of-another-shape-rebuilds-a-lone-window ()
+  "A layout of another shape is built in the last window, which shows a pane."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (delete-window (cadr (ghostel-tmux--tile-windows ctl 0)))
+    (set-buffer ctl)
+    (puthash 0 (plist-put (gethash 0 ghostel-tmux--windows) :tree
+                          (ghostel-tmux--parse-layout-tree
+                           "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0[39x11,40,0,6,39x11,40,12,7]}"))
+             ghostel-tmux--windows)
+    (ghostel-tmux--tile-update 0)
+    (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6 7)))))
+
+(ert-deftest ghostel-tmux-test-tile-update-keeps-a-lone-window-of-a-sibling-pane ()
+  "The last window of a tile that shows another pane of it stays in the tile."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (delete-window (cadr windows))
+      (set-window-buffer (car windows) (gethash 6 ghostel-tmux--panes))
+      (set-buffer ctl)
+      (puthash 0 (plist-put (gethash 0 ghostel-tmux--windows) :tree
+                            (ghostel-tmux--parse-layout-tree "bbbb,79x23,0,0,6"))
+               ghostel-tmux--windows)
+      (ghostel-tmux--tile-update 0)
+      (should (equal (ghostel-tmux-test--tile-pids ctl) '(6))))))
+
 (ert-deftest ghostel-tmux-test-tile-check-rebuilds-after-a-deleted-window ()
   "A tile of three that lost a window is built again."
   (ghostel-tmux-test--with-tile ctl '(5 6 7)
@@ -6131,6 +6200,33 @@ tmux resizing a zoomed window reports it unzoomed on the way."
       (set-window-buffer (cadr windows) (get-buffer-create "*scratch*"))
       (ghostel-tmux-test--feed ctl "%window-pane-changed @0 %6\r\n")
       (should (eq (selected-window) (car windows))))))
+
+(ert-deftest ghostel-tmux-test-report-leaves-a-tile-window-showing-another-buffer ()
+  "A report keeps the selection of a tile window that shows another buffer."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((other (cadr (ghostel-tmux--tile-windows ctl 0))))
+      (set-window-buffer other (get-buffer-create "*scratch*"))
+      (select-window other)
+      (set-buffer ctl)
+      (ghostel-tmux-test--feed
+       ctl (concat "%layout-change @0 bbbb,79x23,0,0{59x23,0,0,5,19x23,60,0,6}"
+                   " bbbb,79x23,0,0{59x23,0,0,5,19x23,60,0,6} *\r\n"))
+      (should (eq (selected-window) other))
+      (ghostel-tmux-test--feed ctl "%window-pane-changed @0 %5\r\n")
+      (should (eq (selected-window) other)))))
+
+(ert-deftest ghostel-tmux-test-report-moves-a-tile-window-showing-a-sibling-pane ()
+  "A report takes the selection from a tile window that shows another pane."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7)
+      "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0[39x11,40,0,6,39x11,40,12,7]}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (set-window-buffer (nth 1 windows) (gethash 5 ghostel-tmux--panes))
+      (select-window (nth 1 windows))
+      (set-buffer ctl)
+      (ghostel-tmux-test--feed ctl "%window-pane-changed @0 %7\r\n")
+      (should (eq (selected-window) (nth 2 windows))))))
 
 (ert-deftest ghostel-tmux-test-selecting-a-tile-of-another-window-sends-its-size ()
   "A tile of a tmux window that is not the current one reports its size."
@@ -6608,6 +6704,24 @@ BODY starts with no held calls and its own `minibuffer-exit-hook'."
                 (should-not ghostel-tmux--held-calls)
                 (should-not minibuffer-exit-hook))
             (maphash (lambda (_pid b) (kill-buffer b)) ghostel-tmux--panes)))))))
+
+(ert-deftest ghostel-tmux-test-held-layout-frees-a-lone-window-of-another-buffer ()
+  "A layout held back leaves the last window of a tile to its other buffer."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0))
+          (scratch (get-buffer-create "*scratch*")))
+      (set-window-buffer (car windows) scratch)
+      (delete-window (cadr windows))
+      (ghostel-tmux-test--with-minibuffer open
+        (ghostel-tmux--tile-check)
+        (ghostel-tmux--tile-update 0)
+        (should (ghostel-tmux--tile-windows ctl 0))
+        (setq open nil)
+        (ghostel-tmux--run-held-calls))
+      (should-not (ghostel-tmux--tile-windows ctl 0))
+      (should (equal (window-list nil 'no-mini) (list (car windows))))
+      (should (eq (window-buffer (car windows)) scratch)))))
 
 (ert-deftest ghostel-tmux-test-attach-pane-held-back-leaves-another-buffer ()
   "A window switched to another buffer from the minibuffer keeps it."
