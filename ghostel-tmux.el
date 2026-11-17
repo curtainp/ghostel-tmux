@@ -2258,6 +2258,54 @@ the prefix byte to the underlying program."
 
 (ghostel-tmux--install-prefix-key ghostel-tmux-prefix-key)
 
+(easy-menu-define ghostel-tmux-menu ghostel-tmux-pane-mode-map
+  "Menu for `ghostel-tmux-pane-mode'."
+  '("Tmux"
+    ("Pane" :active (buffer-live-p ghostel-tmux--controller-buffer)
+     ["Split Below" ghostel-tmux--prefix-split-h]
+     ["Split Right" ghostel-tmux--prefix-split-v]
+     ["Zoom" ghostel-tmux--prefix-zoom
+      :active ghostel-tmux-split-windows]
+     ["Restore Split" ghostel-tmux-restore-split
+      :active ghostel-tmux-split-windows
+      :help "Split the window again as tmux lays it out"]
+     "--"
+     ["Next in Window" ghostel-tmux--prefix-next-pane]
+     ["Next" ghostel-tmux-next-pane
+      :help "Next pane in tab order, across windows"]
+     ["Previous" ghostel-tmux-prev-pane
+      :help "Previous pane in tab order, across windows"]
+     ["Switch..." ghostel-tmux-switch-pane]
+     "--"
+     ["Kill" ghostel-tmux--prefix-kill-pane])
+    ("Window" :active (buffer-live-p ghostel-tmux--controller-buffer)
+     ["New" ghostel-tmux--prefix-new-window]
+     ["Next" ghostel-tmux--prefix-next-window]
+     ["Previous" ghostel-tmux--prefix-prev-window]
+     ["Rename..." ghostel-tmux--prefix-rename-window]
+     "--"
+     ["Kill" ghostel-tmux--prefix-kill-window])
+    ("Session" :active (buffer-live-p ghostel-tmux--controller-buffer)
+     ["Next" ghostel-tmux--prefix-next-session]
+     ["Previous" ghostel-tmux--prefix-prev-session]
+     ["Last Used" ghostel-tmux--prefix-last-session]
+     ["Switch..." ghostel-tmux-switch-session]
+     ["Rename..." ghostel-tmux--prefix-rename-session]
+     "--"
+     ["Run tmux Command..." ghostel-tmux--prefix-cmd]
+     "--"
+     ["Detach" ghostel-tmux-detach]
+     ["Reset" ghostel-tmux-reset
+      :help "Tear down the connection of a session that got stuck"])
+    "--"
+    ["Attach..." ghostel-tmux-attach]
+    ["New Session..." ghostel-tmux-new]
+    ["Capture Pane..." ghostel-tmux-capture
+     :help "Snapshot a pane into a buffer without a connection"]
+    "--"
+    ["Describe Prefix Keys" (describe-keymap 'ghostel-tmux-prefix-map)]
+    ["Customize" (customize-group 'ghostel-tmux)]))
+
 (define-minor-mode ghostel-tmux-pane-mode
   "Minor mode making this ghostel buffer act as a tmux pane.
 Activated when the controller materializes a pane buffer.  Composes
