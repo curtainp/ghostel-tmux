@@ -987,6 +987,13 @@ fills its output queue between the two repeats the CR."
                     ctl '(10 20) #'ghostel-tmux--prefix-prev-window)
                    '("previous-window -t $2")))))
 
+(ert-deftest ghostel-tmux-test-prefix-last-window-leaves-the-history-to-tmux ()
+  "`C-t l' sends `last-window'."
+  (ghostel-tmux-test--with-controller ctl
+    (should (equal (ghostel-tmux-test--cycle
+                    ctl '(10 20) #'ghostel-tmux--prefix-last-window)
+                   '("last-window -t $2")))))
+
 (ert-deftest ghostel-tmux-test-prefix-next-window-noop-on-single-window ()
   "With one window tmux would answer with an error: send nothing."
   (ghostel-tmux-test--with-controller ctl

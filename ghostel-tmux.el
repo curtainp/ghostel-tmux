@@ -2126,8 +2126,8 @@ Without `ghostel-tmux-split-windows', the pane shown is zoomed always."
   "Kill the current window.")
 
 (defun ghostel-tmux--cycle-window (command)
-  "Run COMMAND, `next-window' or `previous-window', on this session.
-tmux knows the window order, which reaches us late or not at all.
+  "Run COMMAND, such as `next-window' or `last-window', on this session.
+tmux knows the window order and history, which reach us late or not at all.
 The visible switch happens reactively in `--on-session-window-changed'."
   (let ((controller ghostel-tmux--controller-buffer)
         (target (ghostel-tmux--session-target)))
@@ -2147,6 +2147,12 @@ The visible switch happens reactively in `--on-session-window-changed'."
   (interactive)
   (ghostel-tmux--cycle-window "previous-window"))
 (define-key ghostel-tmux-prefix-map (kbd "p") #'ghostel-tmux--prefix-prev-window)
+
+(defun ghostel-tmux--prefix-last-window ()
+  "Switch to the tmux window used last and display its active pane."
+  (interactive)
+  (ghostel-tmux--cycle-window "last-window"))
+(define-key ghostel-tmux-prefix-map (kbd "l") #'ghostel-tmux--prefix-last-window)
 
 (defun ghostel-tmux--prefix-next-pane ()
   "Switch to the next pane in the current tmux window."
@@ -2282,6 +2288,7 @@ the prefix byte to the underlying program."
      ["New" ghostel-tmux--prefix-new-window]
      ["Next" ghostel-tmux--prefix-next-window]
      ["Previous" ghostel-tmux--prefix-prev-window]
+     ["Last Used" ghostel-tmux--prefix-last-window]
      ["Rename..." ghostel-tmux--prefix-rename-window]
      "--"
      ["Kill" ghostel-tmux--prefix-kill-window])
